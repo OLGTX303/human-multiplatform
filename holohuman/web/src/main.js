@@ -1,7 +1,8 @@
 import * as THREE from 'three'
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
-import { loadMina } from './mina.js'
+import { loadMina, tuneMaterials } from './mina.js'
 import { LipSync } from './lipsync.js'
 import { Pipeline } from './pipeline.js'
 import { Behavior } from './behavior.js'
@@ -11,21 +12,50 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
 renderer.setSize(innerWidth, innerHeight)
 renderer.outputColorSpace = THREE.SRGBColorSpace
+// cinematic output: ACES filmic roll-off, soft shadows, moody exposure
+renderer.toneMapping = THREE.ACESFilmicToneMapping
+renderer.toneMappingExposure = 0.92
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
 document.getElementById('app').appendChild(renderer.domElement)
 
 const scene = new THREE.Scene()
+scene.background = new THREE.Color(0x08080e)
+scene.fog = new THREE.Fog(0x08080e, 6, 14)
 const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 50)
-scene.add(new THREE.AmbientLight(0xffffff, 0.9))
-const key = new THREE.DirectionalLight(0xffffff, 1.6)
-key.position.set(1, 2, 2)
+// studio IBL — enough contrast for believable specular on skin + latex
+const pmrem = new THREE.PMREMGenerator(renderer)
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.065).texture
+pmrem.dispose()
+scene.add(new THREE.HemisphereLight(0xffe8d0, 0x1a2038, 0.22))
+scene.add(new THREE.AmbientLight(0x2a3048, 0.08))
+// warm key — camera-left, slightly above eye line (classic interview look)
+const key = new THREE.DirectionalLight(0xffe2c8, 1.35)
+key.position.set(2.2, 2.4, 1.6)
+key.castShadow = true
+key.shadow.mapSize.set(2048, 2048)
+key.shadow.camera.near = 0.5
+key.shadow.camera.far = 8
+key.shadow.camera.left = key.shadow.camera.bottom = -1.5
+key.shadow.camera.right = key.shadow.camera.top = 1.5
+key.shadow.bias = -0.0015
+key.shadow.radius = 2
 scene.add(key)
-const rim = new THREE.DirectionalLight(0x88aaff, 0.8)
-rim.position.set(-1, 1.5, -2)
+// cool fill — opposite side, lifts shadow detail without killing mood
+const fill = new THREE.DirectionalLight(0x8aa8d8, 0.32)
+fill.position.set(-2.4, 1.2, 2.2)
+scene.add(fill)
+// rim/back — separates silhouette from the dark stage
+const rim = new THREE.DirectionalLight(0xa8c8ff, 0.55)
+rim.position.set(-1.2, 2.2, -2.8)
 scene.add(rim)
 
 const ground = new THREE.Mesh(
   new THREE.CircleGeometry(1.4, 48),
-  new THREE.MeshStandardMaterial({ color: 0x14141c, roughness: 0.95, metalness: 0 }),
+  new THREE.MeshPhysicalMaterial({
+    color: 0x09090f, roughness: 0.82, metalness: 0.12,
+    clearcoat: 0.35, clearcoatRoughness: 0.6, envMapIntensity: 0.4,
+  }),
 )
 ground.rotation.x = -Math.PI / 2
 ground.receiveShadow = true
@@ -53,6 +83,7 @@ function setAvatar(a) {
   lookHeight = a.lookHeight ?? 1.35
   fitCamera()
   scene.add(a.scene)
+  tuneMaterials(a.scene, renderer)
   document.getElementById('hint').classList.add('hidden')
 }
 
@@ -162,7 +193,21 @@ function render() {
 const lipsync = new LipSync()
 const behavior = new Behavior(lipsync)
 window.__behavior = behavior
-new Pipeline(lipsync) // wires up chat UI, TTS playback, mic → ASR
+const pipeline = new Pipeline(lipsync) // wires up chat UI, TTS playback, mic → ASR
+
+// ---------------------------------------------------------------- presence
+// she watches your cursor like you're in the room with her
+addEventListener('pointermove', e => {
+  behavior.lookToward((e.clientX / innerWidth) * 2 - 1, 1 - (e.clientY / innerHeight) * 2)
+})
+// tapping her makes her happy; first interaction also unlocks audio → greeting
+document.getElementById('app').addEventListener('pointerdown', () => {
+  behavior.setEmotion('happy', 0.9, 2)
+  behavior.tiltPulse = 1
+})
+const greetOnce = () => pipeline.greet()
+addEventListener('pointerdown', greetOnce, { once: true })
+addEventListener('keydown', greetOnce, { once: true })
 
 // ---------------------------------------------------------------- controls
 document.getElementById('emotion').onchange = e => {
@@ -193,8 +238,10 @@ window.holo = {
     if (z !== undefined) r.z = z
     b.rotation.copy(r)
   },
-  bones: () => ['head', 'neck', 'chest', 'spine', 'leftUpperArm', 'rightUpperArm',
-    'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand', 'leftThigh', 'rightThigh']
+  bones: () => ['head', 'neck', 'chest', 'spine', 'hips',
+    'leftClavicle', 'rightClavicle', 'leftUpperArm', 'rightUpperArm',
+    'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand',
+    'leftThigh', 'rightThigh', 'leftCalf', 'rightCalf', 'leftFoot', 'rightFoot']
     .filter(k => avatar?.getBone(k)),
 }
 

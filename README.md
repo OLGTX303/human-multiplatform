@@ -1,4 +1,4 @@
-# Multi-Platform Deployment Solution for LKZMuZiLi/human (3D Holographic Digital Human)
+# Multi-Platform Deployment Solution for 3D Holographic Digital Human
 
 This package extends the original Unity 2022.3.31 URP digital-human project so the same codebase deploys to **Windows, macOS, Linux, Android, iOS, and WebGL**, each with an appropriate "holographic" presentation mode.
 

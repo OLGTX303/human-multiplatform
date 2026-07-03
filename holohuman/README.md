@@ -1,6 +1,6 @@
 # HoloHuman — 3D holographic digital human, no Unity
 
-Web-native rebuild of the [LKZMuZiLi/human](https://github.com/LKZMuZiLi/human) pipeline:
+Web-native rebuild of the original Unity holographic digital-human pipeline:
 **mic → ASR → LLM → TTS → lip-synced 3D avatar**, with the same holographic display
 modes as the Unity multi-platform package, but running in any browser.
 

@@ -1,4 +1,4 @@
-# Integration Guide — wiring the package into LKZMuZiLi/human
+# Integration Guide — wiring the package into the Unity digital-human project
 
 ## Step 1 — Copy files
 Copy `Assets/CrossPlatform/` and `Assets/Editor/MultiPlatformBuilder.cs` into

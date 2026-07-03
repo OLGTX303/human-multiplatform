@@ -120,28 +120,45 @@ def _wav_bytes(samples, sr: int) -> bytes:
     return hdr + pcm
 
 
+def _tts_sanitize(text: str) -> str:
+    # phonemizer dies on newlines / emoji / stray symbols ("input=1, output=2");
+    # TTS only needs speakable characters anyway
+    text = re.sub(r"[\r\n]+", " ", text)
+    text = re.sub(r"[^\w\s.,!?;:'\"()\-%$€£¥°]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+async def _tts_edge(text: str) -> Response:
+    import edge_tts
+    buf = io.BytesIO()
+    async for chunk in edge_tts.Communicate(text, CFG["tts"]["edge"]["voice"]).stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    return Response(buf.getvalue(), media_type="audio/mpeg")
+
+
 @app.post("/api/tts")
 async def tts(body: dict):
-    text = body.get("text", "").strip()
+    text = _tts_sanitize(body.get("text", ""))
     if not text:
         raise HTTPException(400, "empty text")
     engine = body.get("engine") or CFG["tts"]["engine"]
 
     if engine == "kokoro":
         k = CFG["tts"]["kokoro"]
-        # to_thread: onnx inference is sync CPU work — must not block the event loop
-        samples, sr = await asyncio.to_thread(
-            _get_kokoro().create, text,
-            voice=k["voice"], speed=k["speed"], lang=k["lang"])
-        return Response(_wav_bytes(samples, sr), media_type="audio/wav")
+        try:
+            # to_thread: onnx inference is sync CPU work — must not block the event loop
+            samples, sr = await asyncio.to_thread(
+                _get_kokoro().create, text,
+                voice=k["voice"], speed=k["speed"], lang=k["lang"])
+            return Response(_wav_bytes(samples, sr), media_type="audio/wav")
+        except Exception as e:
+            # never leave her mute: fall back to edge for this sentence
+            print(f"kokoro failed ({e!r}), falling back to edge")
+            engine = "edge"
 
     if engine == "edge":
-        import edge_tts
-        buf = io.BytesIO()
-        async for chunk in edge_tts.Communicate(text, CFG["tts"]["edge"]["voice"]).stream():
-            if chunk["type"] == "audio":
-                buf.write(chunk["data"])
-        return Response(buf.getvalue(), media_type="audio/mpeg")
+        return await _tts_edge(text)
 
     if engine == "openai":
         o = CFG["tts"]["openai"]

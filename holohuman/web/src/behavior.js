@@ -7,7 +7,7 @@ const outward = v => Math.max(0, v)
 // layered sines ≈ organic noise (cheap perlin substitute)
 const wobble = (t, f) => (Math.sin(t * f) + Math.sin(t * f * 2.7 + 1.3) * 0.5 + Math.sin(t * f * 0.31 + 4.1) * 0.8) / 2.3
 // one driver → correlated x/y/z so joints rotate as a bundle, not independent axes
-const bundle = (driver, px, py, pz) => ({ x: driver * px, y: driver * py, z: driver * pz })
+const bundle = (driver, px = 0, py = 0, pz = 0) => ({ x: driver * px, y: driver * py, z: driver * pz })
 const addB = (...parts) => parts.reduce((a, b) => ({
   x: a.x + b.x, y: a.y + b.y, z: a.z + b.z,
 }), { x: 0, y: 0, z: 0 })
@@ -45,9 +45,15 @@ export class Behavior {
     this.faceCheek = 0; this.faceDimple = 0; this.talkSquint = 0
     this.faceSideL = 0; this.faceSideR = 0; this.faceRollU = 0; this.faceRollL = 0
     this.faceSmileL = 0; this.faceSmileR = 0
+    this.faceShrugU = 0; this.faceShrugL = 0; this.faceJawFwd = 0; this.facePuff = 0
+    // talking arm gestures: per-arm goal + eased current pose
+    this.gestT = 0
+    this.gest = [{ lift: 0, bend: 0, out: 0 }, { lift: 0, bend: 0, out: 0 }]
+    this.gestGoal = [{ lift: 0, bend: 0, out: 0 }, { lift: 0, bend: 0, out: 0 }]
     // emotion envelopes (decay toward baseline each frame)
     this.smile = 0.12; this.browUp = 0; this.smileTarget = 0.12; this.browTarget = 0
     this.tiltPulse = 0
+    this.energy = 0.5 // conversational arousal: scales gesture size/tempo
     // posture drift: the body slowly settles into a new stance every few seconds
     this.postureT = 3
     this.pose = { lean: 0, twist: 0, drop: 0 }       // current
@@ -74,23 +80,46 @@ export class Behavior {
     this.emoPulseT = pulseSeconds
   }
 
+  // companion gaze: follow the user's pointer (x,y in [-1,1], y up)
+  lookToward(x, y) {
+    this.tx = Math.max(-1, Math.min(1, x)) * 0.8
+    this.ty = Math.max(-1, Math.min(1, y)) * 0.45
+    this.gazeT = Math.max(this.gazeT, 0.8) // hold on the cursor before saccading away
+  }
+
   setDance(on) {
     if (this.dancing && !on) this.danceRestore = true
     this.dancing = on
     if (on) this.dancePhase = performance.now() * 0.001 * 2 * Math.PI * (112 / 60)
   }
 
-  // called by the pipeline for every sentence sent to TTS — cheap "emotion"
+  // called by the pipeline for every sentence sent to TTS — auto emotion AND
+  // body action, so she performs the line instead of standing like a model
   cueSentence(s) {
     if (!this.emoLocked || this.emoName === 'neutral') {
-      if (/haha|lol|😂|🤣|hilarious|so funny/i.test(s)) this.setEmotion('laugh', 0.9, 3)
-      else if (/😢|😭|i'?m sorry to|so sad|unfortunately|terrible news/i.test(s)) this.setEmotion('sad', 0.8, 3.5)
-      else if (/😠|outrageous|unacceptable|angry/i.test(s)) this.setEmotion('angry', 0.7, 3)
-      else if (/wow|amazing|incredible|😮|really\?/i.test(s)) this.setEmotion('surprised', 0.8, 2.5)
+      if (/haha|lol|😂|🤣|hilarious|so funny|joke/i.test(s)) this.setEmotion('laugh', 0.9, 3)
+      else if (/😢|😭|i'?m sorry|so sad|sadly|unfortunately|terrible|miss(ed)? you|lonely/i.test(s)) this.setEmotion('sad', 0.8, 3.5)
+      else if (/😠|outrageous|unacceptable|angry|annoying|ugh\b/i.test(s)) this.setEmotion('angry', 0.7, 3)
+      else if (/wow|amazing|incredible|unbelievable|😮|really\?|no way|can'?t believe/i.test(s)) this.setEmotion('surprised', 0.8, 2.5)
+      else if (/😄|😀|🎉|love|great|awesome|glad|happy|excited|yay|nice to/i.test(s)) this.setEmotion('happy', 0.7, 3)
     }
+    // arousal: exclamations and emotive words energize the whole body
+    const excited = /[!🎉😄😂🤣]|wow|amazing|love|great|awesome|yay|no way/i.test(s)
+    this.energy = excited ? 1 : Math.max(this.energy, 0.65)
     if (/[!😀😄🎉]|great|awesome|glad|nice|love/i.test(s)) { this.smileTarget = 0.65 }
-    else if (/\?$/.test(s.trim())) { this.browTarget = 0.7; this.tiltPulse = 1 }
-    else { this.browTarget = 0.35 } // mild brow raise at each new sentence
+    if (/\?\s*$/.test(s.trim())) {
+      this.browTarget = 0.7
+      this.tiltPulse = 1
+      // asking: offer a hand — force an open gesture on one arm right now
+      const g = this.gestGoal[Math.random() < 0.5 ? 0 : 1]
+      g.bend = 0.7; g.lift = 0.28; g.out = 0.22
+      this.gestT = 1.6
+    } else {
+      this.browTarget = 0.35 // mild brow raise at each new sentence
+      this.gestT = Math.min(this.gestT, 0.12 + Math.random() * 0.25) // gesture lands on the beat
+    }
+    // emphatic lines: lean toward the user instead of drifting
+    if (excited) { this.poseT.lean = (Math.random() * 2 - 1) * 0.03; this.poseT.drop = 0; this.postureT = 4 }
   }
 
   update(dt, t) {
@@ -136,15 +165,15 @@ export class Behavior {
     this.funnel += (clamp01(this.talkLow * 2.6 + lipLevel * 0.25) - this.funnel) * lipK
     this.stretch += (clamp01(this.talkHigh * 2.8 + lipLevel * 0.15) - this.stretch) * lipK
     ch.jaw(Math.max(this.jaw * 0.95, this.emo.jaw))
-    ch.funnel(this.funnel * 0.72)
-    ch.stretch(this.stretch * 0.62)
+    ch.funnel(this.funnel * 0.85)
+    ch.stretch(this.stretch * 0.75)
 
     // ---------- talk face — asymmetric corners, lip roll, independent left/right
     const faceK = 1 - Math.exp(-dt * 11)
     const lipAsym = wobble(t, 0.72) * 0.06
-    const pressT = talking ? clamp01(this.talkHigh * 2 + lipLevel * 0.35) * 0.22 : 0
-    const upperT = talking ? clamp01(this.jaw * 0.65 + this.talkLow * 0.45 + lipLevel * 0.15) * 0.28 : 0
-    const lowerT = talking ? clamp01(this.jaw * 0.55 + this.funnel * 0.4 + lipLevel * 0.2) * 0.3 : 0
+    const pressT = talking ? clamp01(this.talkHigh * 2 + lipLevel * 0.35) * 0.26 : 0
+    const upperT = talking ? clamp01(this.jaw * 0.65 + this.talkLow * 0.45 + lipLevel * 0.15) * 0.38 : 0
+    const lowerT = talking ? clamp01(this.jaw * 0.55 + this.funnel * 0.4 + lipLevel * 0.2) * 0.42 : 0
     const cheekT = talking ? clamp01(this.jaw * 0.4 + this.smile * 0.25) * 0.22 : 0
     const dimpleT = talking ? clamp01(this.smile * 0.4 + talk * 0.1) * 0.24 : 0
     const squintT = talking ? talk * 0.1 : 0
@@ -154,6 +183,12 @@ export class Behavior {
     const rollLT = talking ? clamp01(this.jaw * 0.5 + this.stretch * 0.25) * 0.2 : 0
     const smileLT = talking ? clamp01(this.smile * 0.5 + this.talkLow * 0.35) * 0.22 : 0
     const smileRT = talking ? clamp01(this.smile * 0.5 + this.talkHigh * 0.35) * 0.22 : 0
+    // lip fine detail: shrug on rounded/low vowels, jaw thrust on open lows,
+    // cheek puff on plosive bursts (fast jaw rise)
+    const shrugUT = talking ? clamp01(this.funnel * 0.8 - this.jaw * 0.25) * 0.45 : 0
+    const shrugLT = talking ? clamp01(this.funnel * 0.5 + this.talkLow * 0.7) * 0.35 : 0
+    const jawFwdT = talking ? clamp01(this.talkLow * 1.3 + this.jaw * 0.2) * 0.28 : 0
+    const puffT = talking ? clamp01(this.talkLow * 1.1 - this.stretch * 0.6) * 0.18 : 0
     this.facePress += (pressT - this.facePress) * faceK
     this.faceUpper += (upperT - this.faceUpper) * faceK
     this.faceLower += (lowerT - this.faceLower) * faceK
@@ -166,6 +201,14 @@ export class Behavior {
     this.faceRollL += (rollLT - this.faceRollL) * faceK
     this.faceSmileL += (smileLT - this.faceSmileL) * faceK
     this.faceSmileR += (smileRT - this.faceSmileR) * faceK
+    this.faceShrugU += (shrugUT - this.faceShrugU) * faceK
+    this.faceShrugL += (shrugLT - this.faceShrugL) * faceK
+    this.faceJawFwd += (jawFwdT - this.faceJawFwd) * faceK
+    this.facePuff += (puffT - this.facePuff) * faceK
+    C('shrugU')(this.faceShrugU)
+    C('shrugL')(this.faceShrugL)
+    C('jawFwd')(this.faceJawFwd)
+    C('cheekPuff')(this.facePuff)
     C('lipPress')(this.facePress)
     C('lipUpper')(this.faceUpper)
     C('lipLower')(this.faceLower)
@@ -240,11 +283,28 @@ export class Behavior {
         bundle(gazeDrive, 0.12, 0.85, 0.08),
         bundle(talkSway, 0.35, 0.25, 0.15),
         bundle(this.nod, 0.5, 0.15, 0.05),
-        bundle(wobble(t, 0.2), 0.02, 0.04, 0.06),
+        bundle(wobble(t, 0.2), 0.035, 0.06, 0.08),
         bundle(this.tiltPulse, 0.05, 0.02, 0.55),
         { x: this.emo.headX, y: 0, z: 0 },
       )
       setBone(head, addB(r, headMot))
+    }
+
+    // ---------- fingers: never frozen — staggered micro-curl waves; gestures
+    // curl them further (uses last frame's gesture state; runs during dance too)
+    if (a.fingers) {
+      for (let s = 0; s < 2; s++) {
+        const list = s === 0 ? a.fingers.left : a.fingers.right
+        const g = this.gest?.[s]
+        for (let j = 0; j < list.length; j++) {
+          const b = list[j]
+          const r = restOf(b)
+          const isThumb = b.name.startsWith('thumb')
+          const wave = wobble(t + j * 0.9 + s * 2.1, 0.45) * (isThumb ? 0.02 : 0.05)
+          const talkCurl = (g?.bend || 0) * (isThumb ? 0.06 : 0.2) * (0.6 + wobble(t + j, 0.8) * 0.4)
+          b.rotation.z = r.z + wave + talkCurl
+        }
+      }
     }
 
     // ---------- dance overrides body + arms; blend in/out so it never snaps stiff
@@ -260,8 +320,10 @@ export class Behavior {
       this.danceRestore = false
       a.scene.position.y = groundY
       a.scene.rotation.y = 0
-      for (const k of ['head', 'neck', 'chest', 'spine', 'leftUpperArm', 'rightUpperArm',
-        'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand', 'leftThigh', 'rightThigh']) {
+      for (const k of ['head', 'neck', 'chest', 'spine', 'hips',
+        'leftClavicle', 'rightClavicle', 'leftUpperArm', 'rightUpperArm',
+        'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand',
+        'leftThigh', 'rightThigh', 'leftCalf', 'rightCalf', 'leftFoot', 'rightFoot']) {
         const b = a.getBone(k)
         if (b?.userData.rest) b.rotation.copy(b.userData.rest)
         delete b?.userData.smooth
@@ -272,59 +334,105 @@ export class Behavior {
     this.postureT -= dt
     if (this.postureT <= 0) {
       this.postureT = 5 + Math.random() * 9
-      this.poseT.lean = (Math.random() * 2 - 1) * 0.055   // side lean (weight shift)
-      this.poseT.twist = (Math.random() * 2 - 1) * 0.07   // torso turn
-      this.poseT.drop = Math.random() * 0.02              // slight slouch
+      this.poseT.lean = (Math.random() * 2 - 1) * 0.085   // side lean (weight shift)
+      this.poseT.twist = (Math.random() * 2 - 1) * 0.10   // torso turn
+      this.poseT.drop = Math.random() * 0.035             // slight slouch
     }
     const pk = 1 - Math.exp(-dt * 1.2)                    // settle over ~1s
     for (const kk of ['lean', 'twist', 'drop'])
       this.pose[kk] += (this.poseT[kk] - this.pose[kk]) * pk
 
-    // ---------- body: breathing (~15/min), weight shifts, talk gestures
+    // ---------- body: breathing (~15/min) + weight shifts. Root and hips stay
+    // fixed on the vertical axis — all life comes from the joints, so she
+    // stands like a person, not a swinging marionette.
     const breath = Math.sin(t * 1.6)
     const breath2 = Math.sin(t * 1.6 + 0.4)
-    const bodySway = wobble(t, 0.08)
-    const hipSettle = wobble(t + 0.7, 0.12)
     a.scene.position.y = groundY
-    a.scene.rotation.y = bodySway * 0.012 + wobble(t, 0.05) * 0.004
-    // torso chain: one spine driver propagates hip → chest → neck as bundled bones
-    const torsoDrive = breath * 0.55 + bodySway * 0.35 + (talking ? talk * 0.2 : 0)
-    const leanDrive = this.pose.lean + bodySway * 0.25
-    const twistDrive = this.pose.twist + (talking ? talkSway * 0.4 : 0)
+    a.scene.rotation.y = 0
+    const leanDrive = this.pose.lean + wobble(t, 0.08) * 0.008
+    const twistDrive = this.pose.twist + (talking ? talkSway * 0.3 : 0)
     const spine = a.getBone('spine')
     if (spine) {
       const r = restOf(spine)
-      setBone(spine, addB(r,
-        bundle(torsoDrive, 0.25, -twistDrive * 3.2, -leanDrive * 3.5),
-        bundle(hipSettle, 0.35, 0.4, -0.3),
-      ))
+      setBone(spine, {
+        x: r.x + breath * 0.010,
+        y: r.y + twistDrive * 0.45,
+        z: r.z + leanDrive * 0.5,
+      })
     }
     const chest = a.getBone('chest')
     if (chest) {
       const r = restOf(chest)
-      setBone(chest, addB(r,
-        bundle(torsoDrive, 0.55, twistDrive * 2.8, leanDrive * 3.8),
-        bundle(this.pose.drop, 0.8, 0.1, 0.15),
-        bundle(talkSway, 0.3, 0.45, 0.2),
-      ))
+      setBone(chest, {
+        x: r.x + breath * 0.028 + this.pose.drop + (talking ? talk * 0.015 : 0),
+        y: r.y + twistDrive * 0.4 + talkSway * 0.06,
+        z: r.z + leanDrive * 0.45,
+      })
     }
     const neck = a.getBone('neck')
     if (neck) {
       const r = restOf(neck)
-      setBone(neck, addB(r,
-        bundle(torsoDrive * 0.55 + breath2 * 0.15, 0.35, 0.25, leanDrive * 1.2),
-        bundle(talkSway, 0.4, 0.2, 0.15),
-        bundle(wobble(t, 0.18), 0.03, 0.05, 0.04),
-      ))
+      setBone(neck, {
+        x: r.x + breath2 * 0.012 + talkSway * 0.05 + wobble(t, 0.18) * 0.008,
+        y: r.y + twistDrive * 0.2,
+        // neck counters the torso lean so the head stays level
+        z: r.z - leanDrive * 0.55,
+      })
     }
-    for (const [key, ph, side] of [['leftThigh', 0.3, 1], ['rightThigh', 1.1, -1]]) {
-      const thigh = a.getBone(key)
-      if (!thigh) continue
-      const r = restOf(thigh)
-      const legDrive = breath * 0.4 + wobble(t + ph, 0.12)
-      setBone(thigh, addB(r, bundle(legDrive, 0.35, 0.08 * side, leanDrive * 0.55 * side)))
+    // shoulders: tiny breathing shrug, opposite phase per side
+    for (const [ck, sideC] of [['leftClavicle', 1], ['rightClavicle', -1]]) {
+      const c = a.getBone(ck)
+      if (!c) continue
+      const r = restOf(c)
+      setBone(c, { x: r.x, y: r.y, z: r.z + breath * 0.010 * sideC })
     }
-    // arms: shoulder swings on Y only; elbow flexes on X with lag — articulated >, not ghost rod
+    // legs: feet stay planted — thigh takes a micro weight-shift, calf counters
+    // it and the foot counters again, so ankles never leave the floor
+    for (const [tk, ck, fk, ph, sideL] of [
+      ['leftThigh', 'leftCalf', 'leftFoot', 0.3, 1],
+      ['rightThigh', 'rightCalf', 'rightFoot', 1.1, -1]]) {
+      const shift = wobble(t + ph, 0.07) * 0.010 + breath * 0.004
+      const thigh = a.getBone(tk)
+      if (thigh) {
+        const r = restOf(thigh)
+        setBone(thigh, { x: r.x + shift, y: r.y, z: r.z + leanDrive * 0.08 * sideL })
+      }
+      const calf = a.getBone(ck)
+      if (calf) {
+        const r = restOf(calf)
+        setBone(calf, { x: r.x - shift * 1.7, y: r.y, z: r.z })
+      }
+      const foot = a.getBone(fk)
+      if (foot) {
+        const r = restOf(foot)
+        setBone(foot, { x: r.x + shift * 0.7, y: r.y, z: r.z })
+      }
+    }
+    // ---------- arms. Axes measured on this rig (both sides mirrored):
+    // z− lifts the upper arm forward / bends the elbow forward, y− flares out.
+    // While talking: conversational gestures — a new arm pose every ~2s, elbows
+    // bend up, emphasis syllables pulse extra bend. Idle: barely-alive drift.
+    this.energy += (0.5 - this.energy) * (1 - Math.exp(-dt * 0.35)) // cool down
+    this.gestT -= dt
+    if (this.gestT <= 0) {
+      // energized speech → faster, bigger gestures; calm speech → sparser
+      this.gestT = (1.4 + Math.random() * 1.8) / (0.6 + this.energy * 0.8)
+      const amp = 0.55 + this.energy * 0.9
+      for (const g of this.gestGoal) {
+        if (talking && Math.random() < 0.75) {
+          g.bend = (0.45 + Math.random() * 0.6) * amp   // forearm comes up
+          g.lift = (0.10 + Math.random() * 0.22) * amp  // shoulder forward
+          g.out = 0.05 + Math.random() * 0.18           // flare out — never into the torso
+        } else { g.bend = 0; g.lift = 0; g.out = 0 }
+      }
+    }
+    if (!talking) for (const g of this.gestGoal) { g.bend = 0; g.lift = 0; g.out = 0 }
+    const gestK = 1 - Math.exp(-dt * 3.2)
+    for (let i = 0; i < 2; i++)
+      for (const k of ['bend', 'lift', 'out'])
+        this.gest[i][k] += (this.gestGoal[i][k] - this.gest[i][k]) * gestK
+    const beatPulse = this.nod * 0.35   // loud-syllable emphasis → extra elbow bend
+
     const armLife = [
       { upper: 'leftUpperArm', lower: 'leftLowerArm', hand: 'leftHand', ph: 0, side: 1 },
       { upper: 'rightUpperArm', lower: 'rightLowerArm', hand: 'rightHand', ph: 1.7, side: -1 },
@@ -332,13 +440,13 @@ export class Behavior {
     const shoulderK = 1 - Math.exp(-dt * 8)
     const elbowK = 1 - Math.exp(-dt * 5.5)
     const wristK = 1 - Math.exp(-dt * 10)
-    for (const arm of armLife) {
-      const talkAmt = talking ? Math.max(0.35, talk) : 0
-      const shoulderY = wobble(t + arm.ph, 0.13) * 0.018 + breath * 0.005
-        + (talking ? wobble(t + arm.ph, 0.36) * talkAmt * 0.011 : 0)
-      const elbowX = 0.05 + wobble(t + arm.ph + 0.75, 0.16) * 0.014
-        + Math.abs(shoulderY) * 2.2 + (talking ? talkAmt * 0.007 : 0)
-      const wristOut = wobble(t + arm.ph + 1.45, 0.21) * 0.007
+    for (let i = 0; i < armLife.length; i++) {
+      const arm = armLife[i]
+      const g = this.gest[i]
+      const gesturing = g.bend > 0.03
+      const idleSway = wobble(t + arm.ph, 0.13) * 0.024 + breath * 0.006
+      const idleBend = 0.05 + wobble(t + arm.ph + 0.75, 0.16) * 0.03
+      const talkWave = gesturing ? wobble(t + arm.ph, 0.5) * 0.05 : 0
 
       const upper = a.getBone(arm.upper)
       if (upper) {
@@ -346,29 +454,29 @@ export class Behavior {
         if (!upper.userData.smooth) upper.userData.smooth = { x: r.x, y: r.y, z: r.z }
         const s = upper.userData.smooth
         s.x = r.x
-        s.y += ((r.y + shoulderY) - s.y) * shoulderK
-        s.z = r.z
+        s.y += ((r.y + idleSway - g.out) - s.y) * shoulderK
+        s.z += ((r.z - g.lift - beatPulse * 0.15) - s.z) * shoulderK
         setBone(upper, s)
       }
       const lower = a.getBone(arm.lower)
       if (lower) {
         const r = restOf(lower)
-        const goalX = Math.max(r.x, r.x + elbowX)
-        const goalY = r.y - shoulderY * 0.38
         if (!lower.userData.smooth) lower.userData.smooth = { x: r.x, y: r.y, z: r.z }
         const s = lower.userData.smooth
-        s.x += (goalX - s.x) * elbowK
-        s.y += (goalY - s.y) * elbowK
-        s.z = r.z
+        s.x = r.x
+        s.y += ((r.y - idleSway * 0.35) - s.y) * elbowK
+        s.z += ((r.z - (idleBend + g.bend + beatPulse + talkWave)) - s.z) * elbowK
         setBone(lower, s)
       }
       const hand = a.getBone(arm.hand)
       if (hand) {
         const r = restOf(hand)
+        const wristOut = wobble(t + arm.ph + 1.45, 0.21) * 0.007
+          + (gesturing ? wobble(t + arm.ph + 0.4, 0.6) * 0.06 : 0)
         if (!hand.userData.smooth) hand.userData.smooth = { x: r.x, y: r.y, z: r.z }
         const s = hand.userData.smooth
         s.x = r.x
-        s.y += ((r.y - shoulderY * 0.18) - s.y) * wristK
+        s.y += ((r.y - idleSway * 0.18) - s.y) * wristK
         s.z += ((r.z + wristOut * arm.side) - s.z) * wristK
         setBone(hand, s)
       }
@@ -387,33 +495,49 @@ export class Behavior {
 
     this.smileTarget = 0.7 + hit * 0.15
     const groundY = a.groundY ?? 0
-    a.scene.position.y = groundY
+    // beat bounce: a small hop up on the downbeat (never dips feet under floor)
+    a.scene.position.y = groundY + bounce * 0.03 * blend
     a.scene.rotation.y = (sway * 0.045 + wobble(t, 0.35) * 0.012) * blend
 
-    const danceBone = (k, driver, px, py, pz) => {
+    const danceBone = (k, driver, px = 0, py = 0, pz = 0) => {
       const b = a.getBone(k)
       if (!b) return
       setBone(b, addB(restOf(b), bundle(driver * blend, px, py, pz)))
     }
+    // hips lead the groove: side-to-side weight + twist — the butt moves, and
+    // the torso counters above it so it reads as dance, not a pinned pelvis
+    // measured: every hips axis tilts the legs (0.87m lever) — tiny angles are
+    // real weight shifts; the groove reads from bounce + torso counter-sway
+    danceBone('hips', sway, 0.02, 0.035, 0.015)
+    // trimmed amplitudes: groove without pushing hands/torso into each other
     const dTorso = hit * 0.6 + sway * 0.4
-    danceBone('spine', dTorso - bounce * 0.2, 0.55, 0.45)
-    danceBone('chest', dTorso - half * 0.3, 0.5, -0.35)
-    danceBone('neck', dTorso * 0.6 + half * 0.4, 0.35, 0.3)
-    danceBone('head', dTorso * 0.7 + wobble(t, 0.4) * 0.1, 0.4, 0.35)
+    danceBone('spine', dTorso - bounce * 0.2, 0.3, 0.35)
+    danceBone('chest', dTorso - half * 0.3, 0.28, -0.28)
+    danceBone('neck', dTorso * 0.6 + half * 0.4, 0.3, 0.25)
+    danceBone('head', dTorso * 0.7 + wobble(t, 0.4) * 0.1, 0.35, 0.3)
 
-    danceBone('leftThigh', bounce * 0.55 + hit * 0.35, 0.45, 0.35)
-    danceBone('rightThigh', -(bounce * 0.5 + hit * 0.28), 0.4, -0.3)
+    // legs step in place — thigh z = forward/back pitch (measured), alternating
+    danceBone('leftThigh', bounce * 0.55 + hit * 0.35, 0, 0.02, 0.08)
+    danceBone('rightThigh', -(bounce * 0.5 + hit * 0.28), 0, -0.018, 0.075)
 
     const lArm = beat * 0.5 + hit * 0.35 + Math.sin(B + 0.4) * 0.2
     const rArm = -beat * 0.5 - hit * 0.3 + Math.sin(B + Math.PI + 0.2) * 0.2
-    const danceLimb = (upperK, lowerK, handK, drive, side) => {
-      const elbowFlex = 0.14 + drive * 0.22 + Math.sin(B + side) * 0.08
-      const wrist = Math.sin(B + side * 0.5) * 0.05
-      danceBone(upperK, drive, 0, 0.36, 0)
-      danceBone(lowerK, elbowFlex, 0.52, -drive * 0.2, 0)
-      danceBone(handK, 0, 0, wrist * 0.5, 0.1 * side)
+    // measured rig axes: upper/lower z− = forward lift/bend, y− = outward.
+    // Outward bias + forward lift keep hands in front of the body, never
+    // crossing into the torso or skirt.
+    const danceLimb = (upperK, lowerK, handK, drive) => {
+      const wrist = Math.sin(B + drive * 0.5) * 0.06
+      danceBone(upperK, 1,
+        0,
+        drive * 0.2 - 0.16,                       // swing, biased outward (y−)
+        -(0.15 + Math.max(0, drive) * 0.3))       // elbows lift forward (z−)
+      danceBone(lowerK, 1,
+        0,
+        -drive * 0.12,
+        -(0.5 + Math.max(0, drive) * 0.4))        // real elbow bend (z−)
+      danceBone(handK, 1, 0, wrist, wrist * 0.5)
     }
-    danceLimb('leftUpperArm', 'leftLowerArm', 'leftHand', lArm, 1)
-    danceLimb('rightUpperArm', 'rightLowerArm', 'rightHand', rArm, -1)
+    danceLimb('leftUpperArm', 'leftLowerArm', 'leftHand', lArm)
+    danceLimb('rightUpperArm', 'rightLowerArm', 'rightHand', rArm)
   }
 }

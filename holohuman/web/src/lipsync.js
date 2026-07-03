@@ -20,13 +20,16 @@ export class LipSync {
     this.chainEnd = 0
     this.playingUntil = 0
     this.sources = []
+    // synthetic mode: browser speechSynthesis can't route through the analyser,
+    // so while it speaks we generate a speech-like envelope instead
+    this.synth = false
     const unlock = () => { if (this.ctx.state === 'suspended') this.ctx.resume() }
     addEventListener('pointerdown', unlock)
     addEventListener('keydown', unlock)
   }
 
   get playing() {
-    return this.ctx.currentTime < this.playingUntil || this.sources.length > 0
+    return this.synth || this.ctx.currentTime < this.playingUntil || this.sources.length > 0
   }
 
   play(audioBuffer) {
@@ -59,6 +62,7 @@ export class LipSync {
       try { s.disconnect() } catch {}
     }
     this.sources = []
+    this.synth = false
     this.chainEnd = 0
     this.playingUntil = 0
     this.level = 0
@@ -73,6 +77,20 @@ export class LipSync {
   }
 
   tick() {
+    if (this.synth) {
+      // layered sines ≈ syllable rhythm; good enough to read as speech
+      const t = performance.now() / 1000
+      const e = Math.max(0, 0.42
+        + Math.sin(t * 9.1) * 0.33
+        + Math.sin(t * 13.7 + 1.2) * 0.22
+        + Math.sin(t * 5.3 + 0.4) * 0.16)
+      const target = Math.min(1, e)
+      this.lipLevel += (target - this.lipLevel) * (target > this.lipLevel ? 0.58 : 0.32)
+      this.level += (target - this.level) * 0.22
+      this.bandLow += (0.5 + Math.sin(t * 3.1) * 0.3 - this.bandLow) * 0.3
+      this.bandHigh += (0.5 - Math.sin(t * 3.1 + 0.7) * 0.3 - this.bandHigh) * 0.3
+      return
+    }
     const live = this.playing
     if (!live) {
       this.lipLevel *= 0.72

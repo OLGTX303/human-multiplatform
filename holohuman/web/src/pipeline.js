@@ -7,6 +7,43 @@ import { AutoAsr } from './asr.js'
 const SENTENCE_END = /([。！？；!?;]|\.\s|\n)/
 const ASR_LANG = { en: 'en-US', zh: 'zh-CN', ja: 'ja-JP', ko: 'ko-KR' }
 
+// ---------------------------------------------------------------- local brain
+// ponytail: rule-based companion replies — keeps her responsive when the
+// backend is down; the real LLM takes over automatically on reconnect
+const pick = a => a[Math.floor(Math.random() * a.length)]
+function localReply(text) {
+  const t = text.toLowerCase()
+  if (/\b(hi|hello|hey|yo)\b|你好|哈喽/.test(t))
+    return pick(["Hey you! I was hoping you'd come talk to me.",
+      "Hi! I'm right here. What's on your mind?",
+      "Hey! Good to see you again."])
+  if (/how are you|how's it going|你好吗|怎么样/.test(t))
+    return pick(["I'm great now that you're here! How about you?",
+      "Feeling good — a little floaty, but good. How was your day?"])
+  if (/your name|who are you|你是谁/.test(t))
+    return "I'm Mina, your holo companion. I live in this little stage just for you."
+  if (/\b(love|like|miss) (you|u)\b|喜欢你|爱你/.test(t))
+    return pick(["Aww… you're going to make me blush. I like you too.",
+      "I missed you more! Don't stay away so long next time."])
+  if (/\bjoke\b|funny|笑话/.test(t))
+    return pick(["Why don't holograms ever get cold? We're always well-rendered!",
+      "I'd tell you a joke about lag, but you'd get it too late. Haha!"])
+  if (/\b(bye|good\s?night|see you)\b|再见|晚安/.test(t))
+    return pick(["Goodnight! I'll be right here when you come back.",
+      "See you soon, okay? Don't forget about me!"])
+  if (/\bsing\b|唱歌/.test(t))
+    return "My singing voice is still downloading… but I can dance for you! Just say the word."
+  if (/\bdance\b|跳舞/.test(t))
+    return "Okay, watch this!"
+  if (/\?$/.test(text.trim()))
+    return pick(["Ooh, good question. My big brain is offline right now, but I'd love to dig into that when I reconnect!",
+      "Hmm, I honestly don't know — my server's napping. Ask me again in a bit?"])
+  return pick([`"${text.trim().slice(0, 40)}" — tell me more, I'm listening.`,
+    "Mm-hm, I hear you. Go on!",
+    "I like listening to you. What happened next?",
+    "That's interesting! I want to hear the whole story."])
+}
+
 export class Pipeline {
   constructor(lipsync) {
     this.lipsync = lipsync
@@ -24,12 +61,35 @@ export class Pipeline {
     this.$text.addEventListener('keydown', e => { if (e.key === 'Enter') this.sendText() })
     this.initMic()
 
-    fetch('/api/config').then(r => r.json())
-      .then(c => {
-        this.$status.textContent = `LLM ${c.llm_model} · TTS ${c.tts_engine} · ASR ${c.asr_engine}`
-        if (this.asr) this.asr.lang = ASR_LANG[c.asr_lang] || c.asr_lang || 'en-US'
-      })
-      .catch(() => { this.$status.textContent = 'backend offline' })
+    // backend health: poll, show live status, auto-switch local↔backend
+    this.online = false
+    this._health()
+    setInterval(() => this._health(), 8000)
+  }
+
+  async _health() {
+    try {
+      const r = await fetch('/api/config', { signal: AbortSignal.timeout(2500) })
+      const c = await r.json()
+      this.online = true
+      this.$status.textContent = `● LLM ${c.llm_model} · TTS ${c.tts_engine} · ASR ${c.asr_engine}`
+      this.$status.style.color = '#5fbf77'
+      if (this.asr) this.asr.lang = ASR_LANG[c.asr_lang] || c.asr_lang || 'en-US'
+    } catch {
+      this.online = false
+      this.$status.textContent = '● offline — local companion mode'
+      this.$status.style.color = '#e0a23c'
+    }
+  }
+
+  // spoken greeting the first time the user interacts (audio needs a gesture)
+  greet() {
+    if (this.greeted) return
+    this.greeted = true
+    this.enqueueLocal(pick([
+      "Hey! There you are. I'm Mina — talk to me, or just say 'dance'!",
+      "Hi! I've been waiting for you. What should we do today?",
+    ]), this.gen)
   }
 
   sendText() {
@@ -43,11 +103,13 @@ export class Pipeline {
     const gen = (this.gen = (this.gen || 0) + 1)
     this.speechQ = []
     this.lipsync.stop()
+    speechSynthesis.cancel()
     // direct commands: "dance for me" starts dancing, "stop" ends it
     if (/\bdance\b|跳舞/i.test(userText)) window.__behavior?.setDance(true)
     else if (/\bstop\b|停止|别跳/i.test(userText)) window.__behavior?.setDance(false)
     this.messages.push({ role: 'user', content: userText })
     this.subtitle('…')
+    if (!this.online) { this.localRespond(userText, gen); return }
     let full = '', pending = ''
     try {
       const res = await fetch('/api/chat', {
@@ -87,8 +149,44 @@ export class Pipeline {
       this.messages.push({ role: 'assistant', content: full })
       this.speechDone = this.speechDone.then(() => { if (this.gen === gen) this.subtitle('') })
     } catch (e) {
-      this.subtitle('⚠ ' + e.message)
+      // backend died mid-conversation: never leave dead air — answer locally
+      console.warn('backend chat failed, local fallback:', e)
+      this.online = false
+      this._health()
+      this.localRespond(userText, gen)
     }
+  }
+
+  localRespond(userText, gen) {
+    const reply = localReply(userText)
+    this.messages.push({ role: 'assistant', content: reply })
+    this.subtitle(reply)
+    this.enqueueLocal(reply, gen)
+    this.speechDone = this.speechDone.then(() => { if (this.gen === gen) this.subtitle('') })
+  }
+
+  enqueueLocal(sentence, gen = this.gen) {
+    this.speechQ.push({ sentence, gen, local: true })
+    this.drainSpeech()
+  }
+
+  // browser-native TTS; the lipsync synthetic envelope moves her mouth
+  speakLocal(sentence) {
+    return new Promise(res => {
+      const u = new SpeechSynthesisUtterance(sentence)
+      const vs = speechSynthesis.getVoices()
+      u.voice = vs.find(v => /aria|jenny|zira|female|xiaoxiao/i.test(v.name) && v.lang.startsWith('en'))
+        || vs.find(v => v.lang.startsWith('en')) || null
+      u.pitch = 1.15
+      u.rate = 1.02
+      let done = false
+      const end = () => { if (done) return; done = true; this.lipsync.synth = false; res() }
+      u.onstart = () => { if (!done) this.lipsync.synth = true }
+      u.onend = end
+      u.onerror = end
+      speechSynthesis.speak(u)
+      setTimeout(end, 1500 + sentence.length * 120) // watchdog: never hang the queue
+    })
   }
 
   prefetchTts(sentence) {
@@ -119,13 +217,15 @@ export class Pipeline {
       this.speechQ.shift()
       window.__behavior?.cueSentence(job.sentence)
       try {
+        if (job.local) { await this.speakLocal(job.sentence); continue }
         const audio = await job.audio
         if (job.gen !== this.gen) continue
         if (this.lipsync.ctx.state === 'suspended') await this.lipsync.ctx.resume()
         await this.lipsync.play(audio)
       } catch (e) {
-        console.warn('tts failed:', e)
-        this.$status.textContent = '⚠ TTS: ' + e.message
+        // backend TTS failed: speak the sentence with the browser voice instead
+        console.warn('tts failed, browser voice fallback:', e)
+        if (job.gen === this.gen) await this.speakLocal(job.sentence)
       }
     }
     this.speechBusy = false
