@@ -145,17 +145,16 @@ namespace LKZ.GPT
 
 
                 void Disponse(bool isComplete)
-                { 
-                    string temp = "";
+                {
                     var str = request.downloadHandler.text;
-                    if (!string.IsNullOrEmpty(last))
+                    string temp = str.Substring(last.Length);
+                    if (!isComplete)
                     {
-                        temp = str.Replace(last, "");
+                        // only consume complete SSE events; a partial tail waits for the next poll
+                        int cut = temp.LastIndexOf("\n\n");
+                        temp = cut < 0 ? "" : temp.Substring(0, cut + 2);
                     }
-                    else
-                        temp = str;
-
-                    last = str;
+                    last = str.Substring(0, last.Length + temp.Length);
 
                     var datas = temp.Split("data:");
 
@@ -167,23 +166,22 @@ namespace LKZ.GPT
 
                         if (requestJson.Contains("[DONE]"))
                             break;
-                        var jsonP = JToken.Parse(requestJson.Replace("data:", ""));
-                        var item = jsonP["choices"][0];
+                        // holohuman server SSE format: data: {"delta": "..."} / {"error": "..."}
+                        JToken jsonP;
+                        try { jsonP = JToken.Parse(requestJson.Replace("data:", "")); }
+                        catch { continue; } // partial SSE line, completed on next poll
 
-                        var tt = item["delta"].SelectToken("content")?.ToString();
-
-                        if (!string.IsNullOrEmpty(tt))
+                        var err = jsonP.SelectToken("error")?.ToString();
+                        if (!string.IsNullOrEmpty(err))
                         {
-                            tt = tt.Trim();
-                            mess += tt;
-                        }
-                        var finish = item.SelectToken("finish_reason");
-
-                        if (finish != null && finish.ToString() == "stop")
-                        {
+                            Debug.LogError("LLM error: " + err);
                             break;
                         }
-                    } 
+
+                        var tt = jsonP.SelectToken("delta")?.ToString();
+                        if (!string.IsNullOrEmpty(tt))
+                            mess += tt;
+                    }
                     string text2 = "";
                     if (!isComplete)
                     {

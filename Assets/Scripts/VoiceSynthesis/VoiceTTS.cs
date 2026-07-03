@@ -29,9 +29,14 @@ namespace LKZ.VoiceSynthesis
         }
 
         public static IEnumerator Synthesis(string content)
-        { 
-            using (var request = UnityWebRequestMultimedia.GetAudioClip($"http://1.94.131.28:19463/tts?content={content}&id={VoiceID}", AudioType.MPEG))
-            { 
+        {
+            // holohuman server: POST {"text": ...} -> audio/wav (kokoro). VoiceID unused — voice is set in config.yaml.
+            using (var request = new UnityWebRequest("http://127.0.0.1:8710/api/tts", "POST"))
+            {
+                var body = System.Text.Encoding.UTF8.GetBytes(
+                    UnityEngine.JsonUtility.ToJson(new TTSBody { text = content }));
+                request.uploadHandler = new UploadHandlerRaw(body) { contentType = "application/json" };
+                request.downloadHandler = new DownloadHandlerAudioClip(request.url, AudioType.WAV);
                 var result = request.SendWebRequest();
                 while (!result.isDone)
                 {
@@ -48,5 +53,8 @@ namespace LKZ.VoiceSynthesis
                 }
             }
         }
+
+        [System.Serializable]
+        private class TTSBody { public string text; }
     }
 }

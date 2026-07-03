@@ -681,7 +681,7 @@ MonoBehaviour:
   CharacterRoot: {fileID: 1193417261}
   Mode: 0
   AutoSelectPerPlatform: 1
-  AsrUrl: ws://1.94.131.28:19463/recognition
+  AsrUrl:
 --- !u!1 &586792715
 GameObject:
   m_ObjectHideFlags: 0

@@ -8,12 +8,13 @@ using System.IO;
 using System.Net.WebSockets;
 using System.Text;
 using UnityEngine;
+using UnityEngine.Networking;
 
 namespace LKZ.Voice
 {
     public sealed class VoiceRecognizerModel
     {
-        const string url= "ws://1.94.131.28:19463/recognition";
+        const string url = "http://127.0.0.1:8710/api/asr"; // holohuman server (config.yaml)
 
         [Inject]
         private MonoBehaviour _mono { get; set; }
@@ -28,19 +29,11 @@ namespace LKZ.Voice
         private VoiceRecognitionResultCommand voiceRecognitionResult = new VoiceRecognitionResultCommand();
 
         VoiceRecognizerBase voiceRecognizer;
-        LKZ.CrossPlatform.PlatformBootstrap bootstrap;
         public void Initialized()
         {
             RegisterCommand.Register<SettingVoiceRecognitionCommand>(SettingVoiceRecognitionCommandCallback);
-
-            bootstrap = UnityEngine.Object.FindObjectOfType<LKZ.CrossPlatform.PlatformBootstrap>();
-            if (bootstrap != null)
-            {
-                bootstrap.OnSpeechRecognized += this.DisponseRecognition;
-                return;
-            }
-#if UNITY_EDITOR || UNITY_STANDALONE || UNITY_ANDROID
-            voiceRecognizer = new VoiceRecognizerNoWebGL();
+#if !UNITY_WEBGL || UNITY_EDITOR
+            voiceRecognizer = new VoiceRecognizerHttp();
             voiceRecognizer.Initialized(this._mono, url, this.DisponseRecognition);
 #endif
         }
@@ -51,13 +44,7 @@ namespace LKZ.Voice
         /// <param name="obj"></param>
         private void SettingVoiceRecognitionCommandCallback(SettingVoiceRecognitionCommand obj)
         {
-            if (bootstrap != null)
-            {
-                if (obj.IsStartVoiceRecognition) bootstrap.StartListening();
-                else bootstrap.StopListening();
-            }
-            else
-                voiceRecognizer?.SetIsRecogition(obj.IsStartVoiceRecognition);
+            voiceRecognizer?.SetIsRecogition(obj.IsStartVoiceRecognition);
         }
 
         /// <summary>
@@ -97,7 +84,104 @@ namespace LKZ.Voice
         public abstract void Initialized(MonoBehaviour _mono,string websocketUrl, Action<string> _recognizerCallback);
 
         public abstract void SetIsRecogition(bool IsRecogition);
-    } 
+    }
+
+#if !UNITY_WEBGL || UNITY_EDITOR
+    /// <summary>
+    /// Records while recognition is on, then POSTs the WAV to the holohuman
+    /// server's /api/asr (faster-whisper) and forwards the transcription.
+    /// </summary>
+    public sealed class VoiceRecognizerHttp : VoiceRecognizerBase
+    {
+        const int SampleRate = 16000;
+        const int MaxSeconds = 30; // ponytail: fixed utterance cap; chunked streaming if longer speech is needed
+
+        MonoBehaviour _mono;
+        string _url;
+        Action<string> _callback;
+        AudioClip _clip;
+
+        public override void Initialized(MonoBehaviour _mono, string url, Action<string> _recognizerCallback)
+        {
+            this._mono = _mono;
+            _url = url;
+            _callback = _recognizerCallback;
+            _mono.StartCoroutine(RequestMicPermission());
+        }
+
+        IEnumerator RequestMicPermission()
+        {
+            yield return Application.RequestUserAuthorization(UserAuthorization.Microphone);
+        }
+
+        public override void SetIsRecogition(bool IsRecogition)
+        {
+            if (IsRecogition)
+            {
+                _clip = Microphone.Start(null, false, MaxSeconds, SampleRate);
+            }
+            else if (_clip != null)
+            {
+                int pos = Microphone.GetPosition(null);
+                Microphone.End(null);
+                if (pos > 0)
+                {
+                    var samples = new float[pos];
+                    _clip.GetData(samples, 0);
+                    _mono.StartCoroutine(Transcribe(ToWav(samples)));
+                }
+                _clip = null;
+            }
+        }
+
+        IEnumerator Transcribe(byte[] wav)
+        {
+            var form = new WWWForm();
+            form.AddBinaryData("audio", wav, "speech.wav", "audio/wav");
+            using (var req = UnityWebRequest.Post(_url, form))
+            {
+                yield return req.SendWebRequest();
+                if (req.result != UnityWebRequest.Result.Success)
+                {
+                    Debug.LogError("[ASR] " + req.error);
+                    yield break;
+                }
+                var text = JsonUtility.FromJson<AsrResponse>(req.downloadHandler.text).text;
+                if (!string.IsNullOrEmpty(text))
+                {
+                    _callback?.Invoke(text);
+                    _callback?.Invoke("\n"); // signals recognition complete upstream
+                }
+            }
+        }
+
+        static byte[] ToWav(float[] samples)
+        {
+            var pcm = new byte[samples.Length * 2];
+            for (int i = 0; i < samples.Length; i++)
+            {
+                short s = (short)Mathf.Clamp(samples[i] * short.MaxValue, short.MinValue, short.MaxValue);
+                pcm[i * 2] = (byte)(s & 0xff);
+                pcm[i * 2 + 1] = (byte)((s >> 8) & 0xff);
+            }
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms))
+            {
+                w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + pcm.Length);
+                w.Write(Encoding.ASCII.GetBytes("WAVEfmt ")); w.Write(16);
+                w.Write((short)1); w.Write((short)1); w.Write(SampleRate); w.Write(SampleRate * 2);
+                w.Write((short)2); w.Write((short)16);
+                w.Write(Encoding.ASCII.GetBytes("data")); w.Write(pcm.Length);
+                w.Write(pcm);
+                return ms.ToArray();
+            }
+        }
+
+        [Serializable]
+        class AsrResponse { public string text; }
+    }
+#endif
+
 
 #if UNITY_EDITOR ||UNITY_STANDALONE || UNITY_ANDROID
 
