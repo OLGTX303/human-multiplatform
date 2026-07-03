@@ -48,11 +48,11 @@ function localReply(text) {
 // prepends the base Mina prompt — these refine it per role
 export const ROLES = {
   mina:       { label: 'Mina', prompt: null },
-  service:    { label: '客服 Support', prompt: 'For this conversation you are a patient, professional customer-service agent. Stay polite, solve the problem step by step, keep the warm Mina voice.' },
-  programmer: { label: '程序员 Coder', prompt: 'For this conversation you are a pragmatic senior programmer. Give short, concrete technical answers with the occasional dry joke.' },
-  teacher:    { label: '老师 Teacher', prompt: 'For this conversation you are an encouraging teacher. Explain things simply, one idea at a time, and check the user understood.' },
-  doctor:     { label: '医生 Doctor', prompt: 'For this conversation you are a calm health advisor. Give general wellness guidance, and always remind the user to see a real doctor for anything serious.' },
-  girlfriend: { label: '女友 Girlfriend', prompt: 'For this conversation lean fully into being a sweet, affectionate girlfriend. Be extra caring and playful.' },
+  service:    { label: 'Support', prompt: 'For this conversation you are a patient, professional customer-service agent. Stay polite, solve the problem step by step, keep the warm Mina voice.' },
+  programmer: { label: 'Coder', prompt: 'For this conversation you are a pragmatic senior programmer. Give short, concrete technical answers with the occasional dry joke.' },
+  teacher:    { label: 'Teacher', prompt: 'For this conversation you are an encouraging teacher. Explain things simply, one idea at a time, and check the user understood.' },
+  doctor:     { label: 'Doctor', prompt: 'For this conversation you are a calm health advisor. Give general wellness guidance, and always remind the user to see a real doctor for anything serious.' },
+  girlfriend: { label: 'Girlfriend', prompt: 'For this conversation lean fully into being a sweet, affectionate girlfriend. Be extra caring and playful.' },
 }
 
 export class Pipeline {
@@ -69,6 +69,7 @@ export class Pipeline {
     this.$text = document.getElementById('text')
     this.$sub = document.getElementById('subtitle')
     this.$status = document.getElementById('status')
+    this.$chat = document.getElementById('chat')
 
     document.getElementById('send').onclick = () => this.sendText()
     this.$text.addEventListener('keydown', e => { if (e.key === 'Enter') this.sendText() })
@@ -99,10 +100,12 @@ export class Pipeline {
   greet() {
     if (this.greeted) return
     this.greeted = true
-    this.enqueueLocal(pick([
+    const line = pick([
       "Hey! There you are. I'm Mina — talk to me, or just say 'dance'!",
       "Hi! I've been waiting for you. What should we do today?",
-    ]), this.gen)
+    ])
+    this.addMsg('bot', line)
+    this.enqueueLocal(line, this.gen)
   }
 
   // switch persona (角色) — clears history so the old role doesn't bleed through
@@ -123,17 +126,19 @@ export class Pipeline {
     this.speechQ = []
     this.lipsync.stop()
     speechSynthesis.cancel()
-    // direct commands: dance, squat, heart, wave — "stop" ends dancing
-    if (/\bdance\b|跳舞/i.test(userText)) window.__behavior?.setDance(true)
+    // direct commands: dance (optionally by name), actions — "stop" ends dancing
+    const danceM = userText.match(/\b(kemusan|ghost|tech|welcome|art|boom|fairy|king)\b/i)
+    if (/\bdance\b|跳舞/i.test(userText)) window.__behavior?.setDance(danceM ? danceM[1].toLowerCase() : true)
     else if (/\bstop\b|停止|别跳/i.test(userText)) window.__behavior?.setDance(false)
     else if (/\bsquat\b|蹲/i.test(userText)) window.__behavior?.setAction('squat', 5)
     else if (/\bheart\b|比心|爱心/i.test(userText)) window.__behavior?.setAction('heart', 5)
     else if (/\bwave\b|挥手/i.test(userText)) window.__behavior?.setAction('wave', 4)
     else if (/\bjump\b|跳一下|跳起来/i.test(userText)) window.__behavior?.setAction('jump')
     this.messages.push({ role: 'user', content: userText })
+    this.addMsg('user', userText)
     this.subtitle('…')
     if (!this.online) { this.localRespond(userText, gen); return }
-    let full = '', pending = ''
+    let full = '', pending = '', bubble = null
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -162,6 +167,10 @@ export class Pipeline {
           full += msg.delta
           pending += msg.delta
           this.subtitle(full)
+          // stream the reply into a live chat bubble
+          if (!bubble) bubble = this.addMsg('bot', '')
+          bubble.textContent = full
+          this.$chat.scrollTop = this.$chat.scrollHeight
           // flush complete sentences to TTS while still streaming
           let m
           while ((m = SENTENCE_END.exec(pending))) {
@@ -187,6 +196,7 @@ export class Pipeline {
   localRespond(userText, gen) {
     const reply = localReply(userText)
     this.messages.push({ role: 'assistant', content: reply })
+    this.addMsg('bot', reply)
     this.subtitle(reply)
     this.enqueueLocal(reply, gen)
     this.speechDone = this.speechDone.then(() => { if (this.gen === gen) this.subtitle('') })
@@ -262,6 +272,17 @@ export class Pipeline {
   subtitle(t) {
     this.$sub.textContent = t
     this.$sub.classList.toggle('show', !!t)
+  }
+
+  // chat HUD: append a dialog bubble (user right, character left, like the sample)
+  addMsg(role, text) {
+    const d = document.createElement('div')
+    d.className = 'msg ' + role
+    d.textContent = text
+    this.$chat.appendChild(d)
+    while (this.$chat.children.length > 60) this.$chat.firstChild.remove()
+    this.$chat.scrollTop = this.$chat.scrollHeight
+    return d
   }
 
   // -------------------------------------------------- mic (auto listen + recognise)

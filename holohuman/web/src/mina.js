@@ -571,53 +571,84 @@ export async function loadMina() {
 
   // ---- dance: clip-driven, the sample project's mechanism (its Unity animator
   // plays mocap FBX clips; same Character-Creator rig => clips drive Mina
-  // directly, no retargeting). The sample folder shipped without the dance
-  // FBXs, so we auto-load one from models/ when the user provides it.
+  // directly, no retargeting). The 8 dances mirror the sample's dance panel;
+  // music tracks come from the sample's own CDN (downloaded to models/dances/).
+  // The sample shipped WITHOUT the dance FBXs — drop each clip at
+  // holohuman/models/dances/<key>.fbx and it plays with its matched track.
+  const DANCES = [
+    { key: 'kemusan', label: 'Kemusan', music: 'ke_mu_san.mp3' }, // 科目三
+    { key: 'ghost',   label: 'Ghost',   music: '1.mp3' },
+    { key: 'tech',    label: 'Tech',    music: '2.mp3' },
+    { key: 'welcome', label: 'Welcome', music: '3.mp3' },
+    { key: 'art',     label: 'Art',     music: '4.mp3' },
+    { key: 'boom',    label: 'Boom',    music: '5.mp3' },
+    { key: 'fairy',   label: 'Fairy',   music: '3.mp3' }, // sample CDN has 6 tracks for 8 dances
+    { key: 'king',    label: 'King',    music: '5.mp3' },
+  ]
   const mixer = new THREE.AnimationMixer(fbx)
-  let danceAction = null
-  ;(async () => {
-    for (const url of [DIR + 'dance.fbx', '/models/dance.fbx']) {
+  const clipCache = {} // key -> AnimationAction | null (null = tried, missing)
+  let danceAction = null // currently playing action
+  let danceAudio = null
+  let poseSnap = null
+  let danceStopping = false
+
+  async function loadDanceClip(key) {
+    if (key in clipCache) return clipCache[key]
+    for (const url of [`/models/dances/${key}.fbx`, DIR + 'dance.fbx']) {
       try {
         const anim = await new FBXLoader().loadAsync(url)
         const clip = anim.animations.find(c => c.duration > 1)
-        if (clip) {
-          // position tracks live in the source rig's own origin — keep only the
-          // pelvis one (root bounce/steps), re-anchored onto Mina's rest pelvis,
-          // and drop the rest so the clip can't teleport or stretch the body
-          for (let i = clip.tracks.length - 1; i >= 0; i--) {
-            const tr = clip.tracks[i]
-            if (!tr.name.endsWith('.position')) continue
-            const bone = fbx.getObjectByName(tr.name.split('.')[0])
-            if (!bone || !/pelvis|hips/i.test(bone.name)) { clip.tracks.splice(i, 1); continue }
-            const v = tr.values, rest = bone.position
-            const ox = v[0] - rest.x, oy = v[1] - rest.y, oz = v[2] - rest.z
-            for (let j = 0; j < v.length; j += 3) { v[j] -= ox; v[j + 1] -= oy; v[j + 2] -= oz }
-          }
-          danceAction = mixer.clipAction(clip)
-          console.log('[mina] dance clip:', url, clip.duration.toFixed(1) + 's,', clip.tracks.length, 'tracks')
-          break
+        if (!clip) continue
+        // position tracks live in the source rig's own origin — keep only the
+        // pelvis one (root bounce/steps), re-anchored onto Mina's rest pelvis,
+        // and drop the rest so the clip can't teleport or stretch the body
+        for (let i = clip.tracks.length - 1; i >= 0; i--) {
+          const tr = clip.tracks[i]
+          if (!tr.name.endsWith('.position')) continue
+          const bone = fbx.getObjectByName(tr.name.split('.')[0])
+          if (!bone || !/pelvis|hips/i.test(bone.name)) { clip.tracks.splice(i, 1); continue }
+          const v = tr.values, rest = bone.position
+          const ox = v[0] - rest.x, oy = v[1] - rest.y, oz = v[2] - rest.z
+          for (let j = 0; j < v.length; j += 3) { v[j] -= ox; v[j + 1] -= oy; v[j + 2] -= oz }
         }
-      } catch { /* no dance clip at this path */ }
+        console.log('[mina] dance clip:', key, '←', url, clip.duration.toFixed(1) + 's')
+        return (clipCache[key] = mixer.clipAction(clip))
+      } catch { /* try next path */ }
     }
-  })()
-  let poseSnap = null
-  let danceStopping = false
+    return (clipCache[key] = null)
+  }
+
   const dance = {
-    get available() { return !!danceAction },
+    list: DANCES.map(d => ({ key: d.key, label: d.label })),
     get busy() { return !!danceAction && danceAction.isRunning() },
-    start() {
-      if (!danceAction) return
+    // starts dance `key` (default: first). Resolves false if its clip is missing.
+    async start(key = DANCES[0].key) {
+      const meta = DANCES.find(d => d.key === key) || DANCES[0]
+      const action = await loadDanceClip(meta.key)
+      if (!action) return false
+      if (danceAction && danceAction !== action) danceAction.stop()
       danceStopping = false
       // clips animate bone POSITIONS too (pelvis root motion) — snapshot the
       // whole skeleton so stop() can hand a clean pose back to the behavior engine
-      poseSnap = []
-      fbx.traverse(o => { if (o.isBone) poseSnap.push([o, o.position.clone(), o.quaternion.clone()]) })
+      if (!poseSnap) {
+        poseSnap = []
+        fbx.traverse(o => { if (o.isBone) poseSnap.push([o, o.position.clone(), o.quaternion.clone()]) })
+      }
+      danceAction = action
       danceAction.reset().fadeIn(0.5).play()
+      danceAudio?.pause()
+      danceAudio = new Audio('/models/dances/' + meta.music)
+      danceAudio.loop = true
+      danceAudio.volume = 0.75
+      danceAudio.play().catch(() => {}) // missing/blocked music never blocks the dance
+      return true
     },
     stop() {
       if (!danceAction) return
       danceAction.fadeOut(0.6)
       danceStopping = true // finalized frame-side in tick() — timers get throttled
+      danceAudio?.pause()
+      danceAudio = null
     },
     tick() {
       if (danceStopping && danceAction && danceAction.getEffectiveWeight() <= 0.001) {

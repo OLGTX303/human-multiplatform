@@ -29,8 +29,11 @@ export const EMOTIONS = {
 const EMO_KEYS = ['smile', 'jaw', 'squint', 'browUp', 'browSad', 'browDown', 'frown', 'eyeWide', 'tears', 'headX']
 
 // complex body actions: bone offsets from rest, blended in/out over ~0.3s.
-// Angles found empirically on this rig (z− lifts arms forward, thigh z+ =
-// forward pitch, calf z− = knee bend, foot z = ankle pitch).
+// Axes MEASURED on this rig by probing world hand positions (not assumed):
+//   upperArm z− lifts the arm (−2.2 ≈ overhead), and y+ swings it OUTWARD on
+//   BOTH arms (right hand rest x=−0.24, +y keeps it ≤−0.28; left mirrors to +x);
+//   y− drags the hand across the chest — that was the old wave/squat bug.
+//   thigh z+ = forward pitch, calf z− = knee bend, foot z = ankle pitch.
 export const ACTIONS = {
   heart: { // open heart above the head: elbows flared out, hands uncrossed
     emotion: 'happy',
@@ -41,9 +44,9 @@ export const ACTIONS = {
       leftHand: { z: -0.55 }, rightHand: { z: -0.55 }, // wrists curve → heart arcs
       head: { x: 0.08 }, // slight chin tuck
     },
-    via: { // arms rise out to the SIDES first, then close overhead — the
-      // straight blend path sweeps the hands through the face/chest
-      leftUpperArm: { y: -0.55, z: -1.1 }, rightUpperArm: { y: -0.55, z: -1.1 },
+    via: { // arms rise out to the SIDES first (y+ = outward, measured), then
+      // close overhead — the straight path sweeps hands through the face/chest
+      leftUpperArm: { y: 0.55, z: -1.1 }, rightUpperArm: { y: 0.55, z: -1.1 },
       leftLowerArm: { y: 0.2, z: -0.5 }, rightLowerArm: { y: 0.2, z: -0.5 },
     },
   },
@@ -54,20 +57,22 @@ export const ACTIONS = {
       leftCalf: { z: -2.0 }, rightCalf: { z: -2.0 },
       leftFoot: { z: 0.85 }, rightFoot: { z: 0.85 },
       spine: { x: 0.15 }, chest: { x: 0.12 },
-      // arms angle outward around the chest — straight forward grazes it
-      leftUpperArm: { y: -0.22, z: -0.9 }, rightUpperArm: { y: -0.22, z: -0.9 },
+      // arms angle outward (y+, measured) around the chest — y− grazed it
+      leftUpperArm: { y: 0.25, z: -0.9 }, rightUpperArm: { y: 0.25, z: -0.9 },
       leftLowerArm: { y: 0.1, z: -0.5 }, rightLowerArm: { y: 0.1, z: -0.5 },
     },
   },
-  wave: { // friendly overhead wave with the right hand
+  wave: { // overhead wave BESIDE the head — measured: hand lands at (−0.28, 1.69)
+    // vs head top (0, 1.60); the old y:−0.5 put it at (+0.15, 1.48, 0.18) = in
+    // front of the face, crossing the body midline
     emotion: 'happy',
     bones: {
-      rightUpperArm: { y: -0.5, z: -1.9 },
-      rightLowerArm: { z: -0.9 },
+      rightUpperArm: { y: 0.9, z: -2.2 },
+      rightLowerArm: { y: -0.2, z: -0.3 },
       head: { z: 0.1 },
     },
-    via: { rightUpperArm: { y: -0.75, z: -1.0 }, rightLowerArm: { z: -0.4 } }, // arc out, not through the hair/head
-    wiggle: { bone: 'rightLowerArm', axis: 'y', amp: 0.35, freq: 4.2 },
+    via: { rightUpperArm: { y: 0.8, z: -1.2 }, rightLowerArm: { z: -0.2 } }, // side-raise transit, hand stays outboard
+    wiggle: { bone: 'rightLowerArm', axis: 'y', amp: 0.3, freq: 4.2 },
   },
 }
 
@@ -132,16 +137,19 @@ export class Behavior {
     this.gazeT = Math.max(this.gazeT, 0.8) // hold on the cursor before saccading away
   }
 
-  // clip-driven dance (sample mechanism): plays the mocap FBX via the avatar's
-  // AnimationMixer. Returns false when no dance clip is available on this avatar.
-  setDance(on) {
+  // clip-driven dance (sample mechanism): plays a named mocap FBX + its music
+  // via the avatar's dance system. `key` = dance name, true = default dance,
+  // false = stop. Resolves false when that dance's clip file is missing.
+  async setDance(key) {
     const d = this.avatar?.dance
-    if (on && !d?.available) return false
-    if (!!on === this.dancing) return true
-    this.dancing = !!on
-    if (on) { d.start(); this.setEmotion('happy', 0.8, 2) }
-    else { d?.stop(); this.danceRestore = true }
-    return true
+    if (!key) {
+      if (this.dancing) { d?.stop(); this.dancing = false; this.danceRestore = true }
+      return true
+    }
+    if (!d) return false
+    const ok = await d.start(key === true ? undefined : key)
+    if (ok) { this.dancing = true; this.setEmotion('happy', 0.8, 2) }
+    return ok
   }
 
   // complex action by name ('squat' | 'heart' | 'wave' | 'jump'), held for `seconds`

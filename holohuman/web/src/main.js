@@ -233,15 +233,19 @@ document.getElementById('emotion').onchange = e => {
   if (v === 'auto') behavior.setEmotion('neutral', 1, 0.01) // unlock: cues take over
   else behavior.setEmotion(v)
 }
-const danceBtn = document.getElementById('dance')
-danceBtn.onclick = () => {
-  if (!behavior.setDance(!behavior.dancing)) {
+const danceSel = document.getElementById('dance')
+danceSel.onchange = async e => {
+  const v = e.target.value
+  e.target.value = ''
+  if (!v) return
+  const ok = await behavior.setDance(v === 'stop' ? false : v)
+  if (!ok) {
     // the sample project shipped without its dance mocap FBXs — tell the user
-    // where to drop one (any Character-Creator-rig clip plays directly)
-    pipeline.subtitle('💃 needs a dance clip — put one at holohuman/models/mina/dance.fbx')
+    // where to drop each one (any Character-Creator-rig clip plays directly)
+    pipeline.subtitle(`💃 "${v}" needs its clip — put it at holohuman/models/dances/${v}.fbx`)
     setTimeout(() => pipeline.subtitle(''), 5000)
   }
-  danceBtn.style.background = behavior.dancing ? '#7a3a8a' : ''
+  danceSel.style.background = behavior.dancing ? '#7a3a8a' : ''
 }
 // action (动作), role (角色), voice (语种), camera view (视角切换)
 document.getElementById('action').onchange = e => {
@@ -261,7 +265,8 @@ document.getElementById('view').onclick = cycleView
 //   holo.bones()                     list controllable joints
 window.holo = {
   emotion: (n, i = 1, secs = 0) => behavior.setEmotion(n, i, secs),
-  dance: on => { behavior.setDance(on ?? !behavior.dancing) },
+  // holo.dance('kemusan'|'ghost'|...|true|false)
+  dance: on => behavior.setDance(on ?? !behavior.dancing),
   // complex poses: holo.action('heart' | 'squat' | 'wave', seconds)
   action: (name, secs = 4) => behavior.setAction(name, secs),
   // live hair tuning, e.g. holo.hair({ stiffness: 0.3, gravityMultiplier: 1 })

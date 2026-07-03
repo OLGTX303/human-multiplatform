@@ -31,6 +31,22 @@
     #mic.on { background: #1a4a2a; border-color: #3a8a5a; }
     #mic.rec { background: #a1262d; border-color: #d33; }
     #status { position: fixed; top: 12px; left: 12px; font-size: 12px; color: #888; }
+
+    /* chat HUD: scrolling dialog for user + character (like the sample app) */
+    #chat { position: fixed; left: 16px; bottom: 96px; width: min(46vw, 380px);
+      max-height: 38vh; overflow-y: auto; display: flex; flex-direction: column;
+      gap: 6px; pointer-events: none; scrollbar-width: none;
+      -webkit-mask-image: linear-gradient(to bottom, transparent, #000 14%); }
+    #chat::-webkit-scrollbar { display: none; }
+    .msg { max-width: 92%; padding: 7px 12px; border-radius: 12px; font-size: 14px;
+      line-height: 1.45; word-wrap: break-word; white-space: pre-wrap;
+      backdrop-filter: blur(6px); }
+    .msg.user { align-self: flex-end; background: rgba(38,78,150,.72);
+      border: 1px solid rgba(90,140,220,.5); border-bottom-right-radius: 4px; }
+    .msg.bot { align-self: flex-start; background: rgba(16,16,26,.72);
+      border: 1px solid rgba(255,255,255,.14); border-bottom-left-radius: 4px; }
+    .msg.bot::before { content: "Mina"; display: block; font-size: 11px;
+      color: #8fb4ff; margin-bottom: 2px; }
     #hint { position: fixed; inset: 0; display: grid; place-items: center; text-align: center;
       color: #aaa; font-size: 15px; line-height: 2; pointer-events: none; }
     #hint.hidden { display: none; }
@@ -41,6 +57,7 @@
   <div id="hint" class="hidden">No avatar loaded.<br>Drop a <b>.vrm</b> file here, or put it at <code>holohuman/models/avatar.vrm</code></div>
   <div id="subtitle"></div>
   <div id="status"></div>
+  <div id="chat"></div>
   <div id="bar">
     <select id="mode" title="Display mode">
       <option value="standard">Standard</option>
@@ -57,31 +74,42 @@
       <option value="angry">😠 Angry</option>
       <option value="surprised">😮 Surprised</option>
     </select>
-    <button id="dance" title="Dance (舞蹈)">💃</button>
-    <select id="action" title="Action (动作)">
+    <select id="dance" title="Dance">
+      <option value="">💃 Dance</option>
+      <option value="kemusan">Kemusan</option>
+      <option value="ghost">Ghost</option>
+      <option value="tech">Tech</option>
+      <option value="welcome">Welcome</option>
+      <option value="art">Art</option>
+      <option value="boom">Boom</option>
+      <option value="fairy">Fairy</option>
+      <option value="king">King</option>
+      <option value="stop">⏹ Stop</option>
+    </select>
+    <select id="action" title="Action">
       <option value="">🙆 Action</option>
-      <option value="heart">🫰 Heart 比心</option>
-      <option value="wave">👋 Wave 挥手</option>
-      <option value="squat">🏋️ Squat 深蹲</option>
-      <option value="jump">🦘 Jump 跳跃</option>
+      <option value="heart">🫰 Heart</option>
+      <option value="wave">👋 Wave</option>
+      <option value="squat">🏋️ Squat</option>
+      <option value="jump">🦘 Jump</option>
     </select>
-    <select id="role" title="Role (角色)">
+    <select id="role" title="Role">
       <option value="mina">🎭 Mina</option>
-      <option value="service">客服 Support</option>
-      <option value="programmer">程序员 Coder</option>
-      <option value="teacher">老师 Teacher</option>
-      <option value="doctor">医生 Doctor</option>
-      <option value="girlfriend">女友 Girlfriend</option>
+      <option value="service">Support</option>
+      <option value="programmer">Coder</option>
+      <option value="teacher">Teacher</option>
+      <option value="doctor">Doctor</option>
+      <option value="girlfriend">Girlfriend</option>
     </select>
-    <select id="voice" title="Voice (语种)">
-      <option value="">🔊 Default voice</option>
-      <option value="af_heart">Heart 甜美</option>
-      <option value="af_bella">Bella 女主播</option>
-      <option value="af_sarah">Sarah 清新</option>
-      <option value="bf_emma">Emma 英式</option>
-      <option value="am_adam">Adam 男声</option>
+    <select id="voice" title="Voice">
+      <option value="">🔊 Voice</option>
+      <option value="af_heart">Heart</option>
+      <option value="af_bella">Bella</option>
+      <option value="af_sarah">Sarah</option>
+      <option value="bf_emma">Emma</option>
+      <option value="am_adam">Adam</option>
     </select>
-    <button id="view" title="Switch camera view (视角切换)">📷</button>
+    <button id="view" title="Switch camera view">📷</button>
     <input id="text" placeholder="Say something… (Enter to send)" autocomplete="off" />
     <button id="send">Send</button>
     <button id="mic" title="Auto listen (activates on first click)">🎤</button>
