@@ -61,6 +61,8 @@ docs/
   PLATFORM_NOTES.md                          per-platform checklists & gotchas
 ```
 
+> **Status: integrated.** The full Unity project (character assets, scripts, shaders, scene) now lives at the repo root (`Assets/`, `Packages/`, `ProjectSettings/`). `Assets/Scenes/Main.unity` is the cross-platform scene wired to `PlatformBootstrap`; `Assets/Scenes/Windows.unity` is the untouched original. Steps below are kept for reference.
+
 ## 4. Integration in five steps
 
 1. **Copy** `Assets/CrossPlatform` and `Assets/Editor/MultiPlatformBuilder.cs` into the project.

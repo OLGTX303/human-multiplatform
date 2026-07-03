@@ -25,6 +25,19 @@ holohuman/web/*.err.log
 holohuman/server/models/*.onnx
 holohuman/server/models/*.bin
 
+# unity (project root = repo root)
+/Library/
+/Temp/
+/Logs/
+/obj/
+/UserSettings/
+/Builds/
+/*.csproj
+/*.sln
+
+# original sample project (already transplanted into /Assets — do not push)
+holohuman/sample_don't_push/
+
 # local tooling
 .claude/
 .codegraph/
