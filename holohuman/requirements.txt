@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+openai
+pyyaml
+python-multipart
+faster-whisper
+kokoro-onnx
+edge-tts
+numpy

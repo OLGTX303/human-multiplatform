@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "holohuman",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "server.main:app", "--port", "8710", "--app-dir", "F:\\5Gcase\\human-multiplatform\\holohuman"],
+      "port": 8710
+    }
+  ]
+}

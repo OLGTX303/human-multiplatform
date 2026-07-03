@@ -1,0 +1,30 @@
+# secrets
+holohuman/.env
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# node
+holohuman/web/node_modules/
+
+# caches & logs
+holohuman/.cache/
+holohuman/*.log
+holohuman/*.err.log
+holohuman/web/*.log
+holohuman/web/*.err.log
+
+# TTS/ASR models (auto-download on first run — see config.yaml)
+holohuman/server/models/*.onnx
+holohuman/server/models/*.bin
+
+# local tooling
+.codegraph/
+mcps/

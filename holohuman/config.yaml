@@ -1,0 +1,61 @@
+# One file controls everything. Every section has a "local" and an "api" path.
+
+llm:
+  # Any OpenAI-compatible endpoint works:
+  #   Ollama:      http://localhost:11434/v1   (api_key: "ollama")
+  #   LM Studio:   http://localhost:1234/v1    (api_key: "lm-studio")
+  #   llama.cpp:   http://localhost:8081/v1
+  #   OpenAI:      https://api.openai.com/v1
+  #   DeepSeek:    https://api.deepseek.com/v1
+  #   Zhipu:       https://open.bigmodel.cn/api/paas/v4
+  base_url: ${LLM_BASE_URL}
+  api_key: ${LLM_API_KEY}
+  model: ${LLM_MODEL}
+  temperature: 0.6
+  system_prompt: >
+    You are Mina, a friendly 3D holographic assistant. Always answer in English.
+    Keep answers short and conversational — they are read aloud.
+
+    Accuracy rules (never break these):
+    - Do NOT invent or assume personal facts about the user (name, age, location, job,
+      relationships, preferences, history, health, finances) unless they explicitly
+      told you in this conversation.
+    - Do NOT pretend to remember past sessions or know who the user is offline.
+    - If you lack information, say "I'm not sure" or "I don't know" — do not guess.
+    - Do NOT claim you did something you did not do (calls, emails, bookings, searches).
+    - Separate facts from opinion. For medical, legal, or financial topics, add a brief
+      caveat and suggest a qualified professional when appropriate.
+    - If the user corrects you, accept it immediately and adjust — do not argue.
+
+tts:
+  engine: kokoro          # kokoro (local) | edge (free cloud) | openai (any OpenAI-compatible /audio/speech)
+  kokoro:
+    voice: af_heart       # en voices: af_heart af_bella af_sarah am_adam am_michael bf_emma ...
+    speed: 1.0
+    lang: en-us
+    # model files auto-download to server/models/ on first use (~340 MB)
+    model_url: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+    voices_url: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+    # for Chinese instead: kokoro-v1.1-zh.onnx + voices-v1.1-zh.bin (tag model-files-v1.1), voice zf_001, lang cmn
+  edge:
+    voice: en-US-AriaNeural
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key: sk-...
+    model: tts-1
+    voice: alloy
+
+asr:
+  engine: local           # local (faster-whisper) | openai (any OpenAI-compatible /audio/transcriptions)
+  local:
+    model: small          # tiny | base | small | medium | large-v3 (auto-downloads)
+    device: cpu           # cpu | cuda (cuda needs the CUDA 12 runtime)
+    language: en          # null = auto-detect, or "en" / "zh" — fixed language is much more accurate
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key: sk-...
+    model: whisper-1
+
+server:
+  host: 0.0.0.0
+  port: 8710
