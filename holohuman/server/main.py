@@ -150,7 +150,7 @@ async def tts(body: dict):
             # to_thread: onnx inference is sync CPU work — must not block the event loop
             samples, sr = await asyncio.to_thread(
                 _get_kokoro().create, text,
-                voice=k["voice"], speed=k["speed"], lang=k["lang"])
+                voice=body.get("voice") or k["voice"], speed=k["speed"], lang=k["lang"])
             return Response(_wav_bytes(samples, sr), media_type="audio/wav")
         except Exception as e:
             # never leave her mute: fall back to edge for this sentence

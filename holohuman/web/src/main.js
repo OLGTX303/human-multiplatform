@@ -139,10 +139,23 @@ document.getElementById('mode').onchange = e => {
   document.body.classList.toggle('mirror', mode === 'mirror')
 }
 
-function placeCamera(angleDeg, up) {
-  const a = (angleDeg * Math.PI) / 180
-  const aimY = frameHeight
-  camera.position.set(Math.sin(a) * camDist, aimY + 0.06, Math.cos(a) * camDist)
+// camera view presets (视角切换) — cycled by the 📷 button, standard mode only
+const VIEWS = [
+  { zoom: 1,    aimUp: 0,    angle: 0 },  // full body
+  { zoom: 0.42, aimUp: 0.42, angle: 0 },  // portrait: face + shoulders
+  { zoom: 0.75, aimUp: 0.18, angle: 32 }, // three-quarter
+  { zoom: 1.35, aimUp: 0,    angle: 0 },  // wide stage
+]
+let viewIndex = 0
+const view = { zoom: 1, aimUp: 0, angle: 0 } // eased toward VIEWS[viewIndex]
+function cycleView() { viewIndex = (viewIndex + 1) % VIEWS.length }
+
+function placeCamera(angleDeg, up, v) {
+  const zoom = v?.zoom ?? 1, aimUp = v?.aimUp ?? 0, extra = v?.angle ?? 0
+  const a = ((angleDeg + extra) * Math.PI) / 180
+  const aimY = frameHeight + aimUp
+  const d = camDist * zoom
+  camera.position.set(Math.sin(a) * d, aimY + 0.06, Math.cos(a) * d)
   camera.up.copy(up)
   camera.lookAt(0, aimY, 0)
 }
@@ -157,7 +170,12 @@ function render() {
     renderer.setViewport(0, 0, w, h)
     camera.aspect = w / h
     camera.updateProjectionMatrix()
-    placeCamera(0, UP)
+    // glide toward the selected view preset (≈ Unity CameraManager's slerp)
+    const tgt = VIEWS[viewIndex]
+    view.zoom += (tgt.zoom - view.zoom) * 0.08
+    view.aimUp += (tgt.aimUp - view.aimUp) * 0.08
+    view.angle += (tgt.angle - view.angle) * 0.08
+    placeCamera(0, UP, view)
     renderer.setClearColor(0x000000, 1)
     renderer.render(scene, camera)
     return
@@ -220,6 +238,17 @@ danceBtn.onclick = () => {
   behavior.setDance(!behavior.dancing)
   danceBtn.style.background = behavior.dancing ? '#7a3a8a' : ''
 }
+// action (动作), role (角色), voice (语种), camera view (视角切换)
+document.getElementById('action').onchange = e => {
+  if (e.target.value) behavior.setAction(e.target.value, 5)
+  e.target.value = '' // acts like a button group, snaps back to the label
+}
+document.getElementById('role').onchange = e => {
+  pipeline.setRole(e.target.value)
+  behavior.setEmotion('happy', 0.8, 2) // acknowledge the switch
+}
+document.getElementById('voice').onchange = e => { pipeline.voice = e.target.value || null }
+document.getElementById('view').onclick = cycleView
 // public API — full manual control from the console or embedding page:
 //   holo.emotion('laugh')            sustained emotion (or (name, 0..1, seconds) to pulse)
 //   holo.dance(true|false)

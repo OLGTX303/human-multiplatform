@@ -44,10 +44,23 @@ function localReply(text) {
     "That's interesting! I want to hear the whole story."])
 }
 
+// selectable personas (mirrors the Unity sample's 角色 panel); the server still
+// prepends the base Mina prompt — these refine it per role
+export const ROLES = {
+  mina:       { label: 'Mina', prompt: null },
+  service:    { label: '客服 Support', prompt: 'For this conversation you are a patient, professional customer-service agent. Stay polite, solve the problem step by step, keep the warm Mina voice.' },
+  programmer: { label: '程序员 Coder', prompt: 'For this conversation you are a pragmatic senior programmer. Give short, concrete technical answers with the occasional dry joke.' },
+  teacher:    { label: '老师 Teacher', prompt: 'For this conversation you are an encouraging teacher. Explain things simply, one idea at a time, and check the user understood.' },
+  doctor:     { label: '医生 Doctor', prompt: 'For this conversation you are a calm health advisor. Give general wellness guidance, and always remind the user to see a real doctor for anything serious.' },
+  girlfriend: { label: '女友 Girlfriend', prompt: 'For this conversation lean fully into being a sweet, affectionate girlfriend. Be extra caring and playful.' },
+}
+
 export class Pipeline {
   constructor(lipsync) {
     this.lipsync = lipsync
     this.messages = []
+    this.rolePrompt = null
+    this.voice = null // kokoro voice override; null = server config.yaml default
     this.gen = 0
     this.speechQ = []
     this.speechBusy = false
@@ -92,6 +105,12 @@ export class Pipeline {
     ]), this.gen)
   }
 
+  // switch persona (角色) — clears history so the old role doesn't bleed through
+  setRole(key) {
+    this.rolePrompt = ROLES[key]?.prompt ?? null
+    this.messages = []
+  }
+
   sendText() {
     const t = this.$text.value.trim()
     if (!t) return
@@ -119,7 +138,11 @@ export class Pipeline {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: this.messages }),
+        body: JSON.stringify({
+          messages: this.rolePrompt
+            ? [{ role: 'system', content: this.rolePrompt }, ...this.messages]
+            : this.messages,
+        }),
       })
       const reader = res.body.getReader()
       const dec = new TextDecoder()
@@ -198,7 +221,7 @@ export class Pipeline {
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: sentence }),
+        body: JSON.stringify(this.voice ? { text: sentence, voice: this.voice } : { text: sentence }),
       })
       if (!res.ok) throw new Error(await res.text())
       return this.lipsync.decode(await res.arrayBuffer())
