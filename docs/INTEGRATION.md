@@ -45,9 +45,11 @@ private void SettingVoiceRecognitionCommandCallback(SettingVoiceRecognitionComma
 container instead of `FindObjectOfType` — bind it as a singleton in `GameApp`.)
 
 ## Step 4 — Config instead of hardcoded endpoint
-Remove `const string url = "ws://1.94.131.28:19463/recognition";` and read the
-URL from a `Resources/VoiceConfig` asset mirroring the existing `LLMConfig`
-pattern, or simply set it in the `PlatformBootstrap` Inspector per build.
+Remove the hardcoded `const string url = "ws://...";` recognition endpoint and
+read the URL from a `Resources/VoiceConfig` asset mirroring the existing
+`LLMConfig` pattern, or simply set it in the `PlatformBootstrap` Inspector per
+build. Use `wss://` in production — plain `ws://` is blocked by iOS ATS,
+Android 9+, and any page served over https.
 
 ## Step 5 — UI hook for WebGL/mobile
 Browsers and phones require a user gesture before mic capture. The project

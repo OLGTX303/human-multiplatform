@@ -2,6 +2,35 @@
 
 This package extends the original Unity 2022.3.31 URP digital-human project so the same codebase deploys to **Windows, macOS, Linux, Android, iOS, and WebGL**, each with an appropriate "holographic" presentation mode.
 
+## Latest updates
+
+**Web avatar (`holohuman/`)** — Mina now moves and reacts like a performed
+character instead of a static model:
+- **Verlet-chain hair physics**: world-space particle chains per strand with
+  real gravity, wind, and sphere collision against the head/neck/chest/
+  shoulders so hair never clips the body; fully tunable at runtime via
+  `holo.hair({ stiffness, damping, gravityMultiplier, wind, ... })`.
+- **Living posture**: soft knees, real pelvis weight-shift, gesture-driven
+  arms with finger curl, cloth-collision skirt physics (yields to hands/legs,
+  never clips), all standing on one stable vertical axis.
+- **Complex actions**: `squat`, `heart`, `wave`, and a physical `jump` (load →
+  air → landing absorb), triggerable by chat command or `holo.action(name)`.
+  A K-pop dance mode adds hip-wiggle choreography with matching cloth/hair response.
+- **Auto emotion + talk performance**: sentence-level emotion/gesture cues
+  driven from the LLM's own text, plus richer ARKit lip detail (jaw thrust,
+  lip shrug, cheek puff) while speaking.
+- **Offline resilience**: if the backend is unreachable, the pipeline falls
+  back to a local rule-based companion + browser TTS so she never goes silent,
+  and auto-reconnects to the real LLM/TTS/ASR when the backend comes back.
+- Physically-based rendering (IBL environment, ACES tone mapping, soft
+  shadows, per-material skin/cloth/eye response).
+
+**Unity package (`Assets/CrossPlatform/Character/`)** — a matching
+production-grade third-person character controller: movement state machine
+(walk/run/sprint/crouch/slide/jump), foot/hand/look IK, and the same
+verlet-chain hair physics engine with auto-built body colliders from the
+Humanoid avatar. See `docs/CHARACTER_CONTROLLER.md` for setup.
+
 ## 1. Why the original project is Windows-only
 
 The audit of the repo found exactly three platform blockers — everything else (URP rendering, uLipSync, LLM over HTTP, TTS over HTTP) is already cross-platform.
@@ -9,7 +38,7 @@ The audit of the repo found exactly three platform blockers — everything else 
 | # | Blocker | File | Problem |
 |---|---------|------|---------|
 | 1 | Transparent desktop overlay | `Assets/TransparentWindow/TransparentWindow.cs` | P/Invoke into `user32.dll` / `Dwmapi.dll` — Windows only |
-| 2 | Streaming speech recognition | `Assets/Scripts/Models/VoiceRecognizerModel.cs` | `System.Net.WebSockets` is unavailable on WebGL; recognizer class is hardcoded (`new VoiceRecognizerNoWebGL()`); ASR endpoint hardcoded to `ws://1.94.131.28:19463` (cleartext — blocked by iOS ATS, Android 9+, and https pages) |
+| 2 | Streaming speech recognition | `Assets/Scripts/Models/VoiceRecognizerModel.cs` | `System.Net.WebSockets` is unavailable on WebGL; recognizer class is hardcoded (`new VoiceRecognizerNoWebGL()`); ASR endpoint is a hardcoded cleartext `ws://` address (blocked by iOS ATS, Android 9+, and https pages) |
 | 3 | Microphone capture | same | `UnityEngine.Microphone` does not exist on WebGL; mobile needs runtime permissions |
 
 Minor: `Clipboard.cs` also branches on platform, and the single scene is named `Windows.unity`.
