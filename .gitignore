@@ -42,3 +42,8 @@ holohuman/sample_don't_push/
 .claude/
 .codegraph/
 mcps/
+agent-tools/
+terminals/
+
+# large local scratch dump — not part of the repo
+/human/
