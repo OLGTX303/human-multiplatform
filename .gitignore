@@ -26,5 +26,6 @@ holohuman/server/models/*.onnx
 holohuman/server/models/*.bin
 
 # local tooling
+.claude/
 .codegraph/
 mcps/
