@@ -104,9 +104,13 @@ export class Pipeline {
     this.speechQ = []
     this.lipsync.stop()
     speechSynthesis.cancel()
-    // direct commands: "dance for me" starts dancing, "stop" ends it
+    // direct commands: dance, squat, heart, wave — "stop" ends dancing
     if (/\bdance\b|跳舞/i.test(userText)) window.__behavior?.setDance(true)
     else if (/\bstop\b|停止|别跳/i.test(userText)) window.__behavior?.setDance(false)
+    else if (/\bsquat\b|蹲/i.test(userText)) window.__behavior?.setAction('squat', 5)
+    else if (/\bheart\b|比心|爱心/i.test(userText)) window.__behavior?.setAction('heart', 5)
+    else if (/\bwave\b|挥手/i.test(userText)) window.__behavior?.setAction('wave', 4)
+    else if (/\bjump\b|跳一下|跳起来/i.test(userText)) window.__behavior?.setAction('jump')
     this.messages.push({ role: 'user', content: userText })
     this.subtitle('…')
     if (!this.online) { this.localRespond(userText, gen); return }

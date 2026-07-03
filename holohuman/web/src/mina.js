@@ -253,25 +253,39 @@ export async function loadMina() {
     })
   const hairMaxDepth = Math.max(1, ...hairState.map(h => h.depth))
 
+  // ---- hair physics: verlet chains with body colliders + live tuning ------
+  // World-space particles per strand link: gravity, wind, damping, stiffness
+  // toward the authored (draped) style, hard distance constraints, and sphere
+  // collision against head/neck/chest/shoulders so hair can never clip skin.
+  const hairParams = {
+    stiffness: 0.16,        // pull toward the authored style (0..1)
+    damping: 0.12,          // velocity kill per step (0..1)
+    gravityMultiplier: 0.5, // 1 = full 9.8 m/s²
+    wind: new THREE.Vector3(), // steady world-space wind, m/s
+    flutter: 0.35,          // ambient breeze so hair is never frozen
+    collisionRadius: 0.022, // per-particle clearance added to collider radii
+    substeps: 2,            // raise for very fast motion
+  }
+
   // Gravity drape: aim each strand segment (root → tip) toward a blend of its
   // authored direction and straight down, so hair hangs in a natural curve
   // instead of sitting glued to the skull. Tips droop more than roots; strands
   // fan slightly outward for separation; front flows forward, back cascades.
+  // next real link: BFS past the zero-offset duplicate bones (dead-end
+  // decorations) to the first descendant with an actual offset
+  const nextLink = (bone) => {
+    const queue = bone.children.filter(c => c.isBone)
+    while (queue.length) {
+      const q = queue.shift()
+      if (q.position.lengthSq() > 1e-6) return q
+      queue.push(...q.children.filter(c => c.isBone))
+    }
+    return null
+  }
   if (bones.head) {
     const headP = bones.head.getWorldPosition(_v())
-    // next real link: BFS past the zero-offset duplicate bones (dead-end
-    // decorations) to the first descendant with an actual offset
-    const realChild = (bone) => {
-      const queue = bone.children.filter(c => c.isBone)
-      while (queue.length) {
-        const q = queue.shift()
-        if (q.position.lengthSq() > 1e-6) return q
-        queue.push(...q.children.filter(c => c.isBone))
-      }
-      return null
-    }
     for (const h of [...hairState].sort((a, b) => a.depth - b.depth)) {
-      const child = realChild(h.bone)
+      const child = nextLink(h.bone)
       if (child) {
         const t = h.depth / hairMaxDepth
         const bp = h.bone.getWorldPosition(_v())
@@ -290,10 +304,36 @@ export async function loadMina() {
     }
   }
 
-  const prevHeadRot = bones.head ? bones.head.rotation.clone() : null
-  let prevSceneY = fbx.rotation.y
-  let prevHeadPos = null
-  const headVel = { x: 0, z: 0 } // smoothed head world velocity → hair inertia
+  // chains are built AFTER the drape so the sim's rest = the draped style
+  fbx.updateMatrixWorld(true)
+  const hairChains = []
+  for (const h of hairState) {
+    if (/^hair_/i.test(h.bone.parent.name)) continue // chain roots only
+    const links = []
+    for (let b = h.bone; b; b = nextLink(b)) links.push(b)
+    if (links.length < 2) continue
+    hairChains.push(links.map((bone, i) => ({
+      bone,
+      restQ: bone.quaternion.clone(),
+      childLocal: i + 1 < links.length ? links[i + 1].position.clone() : null,
+      len: i > 0 ? bone.getWorldPosition(new THREE.Vector3())
+        .distanceTo(links[i - 1].getWorldPosition(_v())) : 0,
+      pos: bone.getWorldPosition(new THREE.Vector3()),
+      prev: bone.getWorldPosition(new THREE.Vector3()),
+    })))
+  }
+  const hairColliders = []
+  {
+    const C = (bone, r, dy = 0) => bone && hairColliders.push({ bone, r, dy })
+    C(bones.head, 0.095, 0.02)
+    C(bones.neck, 0.055)
+    C(bones.chest, 0.12)
+    C(bones.spine, 0.115)          // upper back — long strands rest on it, not in it
+    C(bones.leftClavicle, 0.06)
+    C(bones.rightClavicle, 0.06)
+    C(bones.leftUpperArm, 0.055)
+    C(bones.rightUpperArm, 0.055)
+  }
 
   console.log('[mina] bones found:', Object.keys(bones).join(','),
     '| hair bones:', hairBones.map(b => b.name).join(','),
@@ -350,29 +390,81 @@ export async function loadMina() {
   function updateSkirt(dt) {
     if (!skirtState.length) return
     const safeDt = Math.max(1 / 120, Math.min(dt, 1 / 20))
-    const hands = []
+    // colliders: hands + leg segments sampled at 3 points each, so a lifting
+    // thigh or stepping calf pushes the cloth no matter where it meets it
+    const colliders = []
     for (const k of ['leftHand', 'rightHand'])
-      if (bones[k]) hands.push(bones[k].getWorldPosition(new THREE.Vector3()))
+      if (bones[k]) colliders.push({ p: bones[k].getWorldPosition(new THREE.Vector3()), r: 0.11 })
+    const seg = (ka, kb, r) => {
+      if (!bones[ka] || !bones[kb]) return
+      const pa = bones[ka].getWorldPosition(new THREE.Vector3())
+      const pb = bones[kb].getWorldPosition(_v())
+      for (const f of [0.25, 0.5, 0.75])
+        colliders.push({ p: pa.clone().lerp(pb, f), r })
+    }
+    seg('leftThigh', 'leftCalf', 0.105)
+    seg('rightThigh', 'rightCalf', 0.105)
+    seg('leftCalf', 'leftFoot', 0.085)
+    seg('rightCalf', 'rightFoot', 0.085)
+    const hipsP = bones.hips ? bones.hips.getWorldPosition(new THREE.Vector3()) : null
+    // a lifting thigh carries the cloth ahead of it (kinematic coupling) —
+    // the spring alone reacts too late at dance tempo
+    const lift = k => bones[k]
+      ? Math.max(0, bones[k].rotation.z - (bones[k].userData.rest?.z ?? bones[k].rotation.z)) : 0
+    const liftL = lift('leftThigh'), liftR = lift('rightThigh')
     for (const s of skirtState) {
       const bp = s.bone.getWorldPosition(_v())
+      // inertia: each panel lags behind its own pivot's motion (body sway,
+      // hip rotation, dance bounce) — cloth swings, it doesn't ride rigidly
+      if (!s.pv) s.pv = { x: 0, y: 0, z: 0, px: bp.x, py: bp.y, pz: bp.z }
+      s.pv.x += ((bp.x - s.pv.px) / safeDt - s.pv.x) * 0.3
+      s.pv.y += ((bp.y - s.pv.py) / safeDt - s.pv.y) * 0.3
+      s.pv.z += ((bp.z - s.pv.pz) / safeDt - s.pv.z) * 0.3
+      s.pv.px = bp.x; s.pv.py = bp.y; s.pv.pz = bp.z
+      let tx = -s.pv.x * 0.55, tz = -s.pv.z * 0.55
+      const nm = s.bone.name
+      const legLift = nm.endsWith('_l') ? liftL : liftR
+      if (legLift > 0 && !nm.includes('back'))
+        tz += legLift * (nm.includes('front') ? 1.6 : 0.9)
+      // vertical drop makes the hem float outward from the body axis
+      if (hipsP) {
+        const rx = bp.x - hipsP.x, rz = bp.z - hipsP.z
+        const rl = Math.hypot(rx, rz) || 1
+        const flare = Math.max(0, -s.pv.y) * 0.45
+        tx += (rx / rl) * flare
+        tz += (rz / rl) * flare
+      }
       bp.y -= 0.08 // test against the middle of the hanging panel, not its pivot
-      let tx = 0, tz = 0
-      for (const hp of hands) {
-        const dx = bp.x - hp.x, dy = bp.y - hp.y, dz = bp.z - hp.z
-        const overlap = 0.11 - Math.hypot(dx, dy, dz)
+      for (const c of colliders) {
+        const dx = bp.x - c.p.x, dy = bp.y - c.p.y, dz = bp.z - c.p.z
+        const overlap = c.r - Math.hypot(dx, dy, dz)
         if (overlap > 0) {
           const hl = Math.hypot(dx, dz) || 1
-          tx += (dx / hl) * overlap * 5.5
-          tz += (dz / hl) * overlap * 5.5
+          tx += (dx / hl) * overlap * 8
+          tz += (dz / hl) * overlap * 8
         }
       }
-      s.vx += (tx - s.x) * 30 * safeDt
-      s.vz += (tz - s.z) * 30 * safeDt
-      s.vx *= Math.exp(-11 * safeDt)
-      s.vz *= Math.exp(-11 * safeDt)
+      s.vx += (tx - s.x) * 46 * safeDt
+      s.vz += (tz - s.z) * 46 * safeDt
+      s.vx *= Math.exp(-13 * safeDt)
+      s.vz *= Math.exp(-13 * safeDt)
       s.x += s.vx
       s.z += s.vz
-      const ang = Math.min(0.38, Math.hypot(s.x, s.z)) // yield, never fold inside-out
+      // cloth never swings INTO the body: strip the inward (toward the hips
+      // axis) component of the applied swing, keep the tangential part
+      if (hipsP) {
+        const rx = bp.x - hipsP.x, rz = bp.z - hipsP.z
+        const rl = Math.hypot(rx, rz) || 1
+        const inward = -(s.x * rx + s.z * rz) / rl
+        if (inward > 0) {
+          s.x += (rx / rl) * inward * 0.9
+          s.z += (rz / rl) * inward * 0.9
+        }
+      }
+      // yield cap grows with the same-side leg lift: in a deep squat the
+      // skirt drapes over the thighs instead of being speared by them
+      const cap = 0.5 + (nm.includes('back') ? 0 : legLift * 0.9)
+      const ang = Math.min(cap, Math.hypot(s.x, s.z))
       s.bone.quaternion.copy(s.restQ)
       if (ang > 0.003) {
         const inv = 1 / Math.hypot(s.x, s.z)
@@ -384,42 +476,84 @@ export async function loadMina() {
     }
   }
 
+  const _hv = new THREE.Vector3(), _ht = new THREE.Vector3(), _hd = new THREE.Vector3()
+  const _hw = new THREE.Vector3(), _hrd = new THREE.Vector3(), _hsd = new THREE.Vector3()
+  const _hq1 = new THREE.Quaternion(), _hq2 = new THREE.Quaternion(), _hq3 = new THREE.Quaternion()
+  let prevRootPos = null
   function updateHair(dt, t) {
-    if (!hairState.length || !bones.head) return
-    const safeDt = Math.max(1 / 120, Math.min(dt, 1 / 20))
-    const head = bones.head.rotation
-    const headDx = prevHeadRot ? head.x - prevHeadRot.x : 0
-    const headDz = prevHeadRot ? head.z - prevHeadRot.z : 0
-    const sceneDy = fbx.rotation.y - prevSceneY
-    if (prevHeadRot) prevHeadRot.copy(head)
-    prevSceneY = fbx.rotation.y
-    // head world velocity: body sway/dance swings the hair even when the head
-    // itself doesn't rotate
-    bones.head.updateWorldMatrix(true, false)
-    const e = bones.head.matrixWorld.elements
-    if (prevHeadPos) {
-      headVel.x += ((e[12] - prevHeadPos.x) / safeDt - headVel.x) * 0.25
-      headVel.z += ((e[14] - prevHeadPos.z) / safeDt - headVel.z) * 0.25
+    if (!hairChains.length) return
+    const p = hairParams
+    const safeDt = Math.max(1 / 240, Math.min(dt, 1 / 30))
+    // teleport guard: a large root jump snaps the sim instead of whipping hair
+    if (prevRootPos && prevRootPos.distanceToSquared(fbx.position) > 0.25) {
+      for (const chain of hairChains)
+        for (const l of chain) { l.bone.getWorldPosition(l.pos); l.prev.copy(l.pos) }
     }
-    prevHeadPos = { x: e[12], z: e[14] }
+    ;(prevRootPos || (prevRootPos = new THREE.Vector3())).copy(fbx.position)
 
-    for (const h of hairState) {
-      const rest = h.bone.userData.hairRest
-      const tip = h.depth / hairMaxDepth
-      const amp = 0.04 + tip * 0.24            // tips swing wide, roots barely
-      const spring = 30 - tip * 19             // loose tips ≈ slow pendulum
-      const damping = 6.5 - tip * 2            // underdamped → follow-through
-      const breeze = (Math.sin(t * 0.9 + h.phase) + Math.sin(t * 1.7 + h.phase * 1.9) * 0.5) * 0.022 * tip
-      const targetX = (-headDx * 4.5 - headVel.z * 0.8 + breeze * h.front) * tip
-      const targetZ = (-headDz * 3.8 - sceneDy * 3.4 + headVel.x * 0.8 + breeze * h.side) * tip
-      h.vx += (targetX - h.x) * spring * safeDt
-      h.vz += (targetZ - h.z) * spring * safeDt
-      h.vx *= Math.exp(-damping * safeDt)
-      h.vz *= Math.exp(-damping * safeDt)
-      h.x += h.vx
-      h.z += h.vz
-      h.bone.rotation.x = rest.x + Math.max(-amp, Math.min(amp, h.x))
-      h.bone.rotation.z = rest.z + Math.max(-amp, Math.min(amp, h.z))
+    const spheres = []
+    for (const c of hairColliders) {
+      c.bone.updateWorldMatrix(true, false)
+      const s = c.bone.getWorldPosition(new THREE.Vector3())
+      s.y += c.dy
+      spheres.push({ c: s, r: c.r + p.collisionRadius })
+    }
+    // wind = steady param + layered-sine flutter so idle hair still breathes
+    _hw.copy(p.wind)
+    _hw.x += (Math.sin(t * 1.3) + Math.sin(t * 2.9 + 1.7) * 0.4) * p.flutter
+    _hw.z += Math.sin(t * 1.1 + 0.9) * p.flutter * 0.7
+    const stepDt = safeDt / p.substeps
+    const gStep = 9.8 * p.gravityMultiplier * stepDt * stepDt
+
+    for (const chain of hairChains) {
+      // root is kinematic: welded to the scalp, follows the head exactly
+      const root = chain[0]
+      root.bone.updateWorldMatrix(true, false)
+      root.bone.getWorldPosition(root.pos)
+      root.prev.copy(root.pos)
+
+      for (let s = 0; s < p.substeps; s++) {
+        for (let i = 1; i < chain.length; i++) {
+          const l = chain[i], par = chain[i - 1]
+          // verlet integrate: inertia + gravity + wind
+          _hv.subVectors(l.pos, l.prev).multiplyScalar(1 - p.damping)
+          l.prev.copy(l.pos)
+          l.pos.add(_hv)
+          l.pos.y -= gStep
+          l.pos.addScaledVector(_hw, stepDt * stepDt)
+          // stiffness: pull toward where the authored style puts this link
+          if (par.childLocal) {
+            _ht.copy(par.childLocal).applyMatrix4(par.bone.matrixWorld)
+            l.pos.lerp(_ht, p.stiffness)
+          }
+          // hard distance constraint: strands never stretch
+          _hd.subVectors(l.pos, par.pos)
+          const dl = _hd.length() || 1e-6
+          l.pos.copy(par.pos).addScaledVector(_hd, l.len / dl)
+          // sphere collision: push out of head/neck/chest/shoulders
+          for (const sp of spheres) {
+            _hd.subVectors(l.pos, sp.c)
+            const dd = _hd.length()
+            if (dd < sp.r && dd > 1e-6) l.pos.copy(sp.c).addScaledVector(_hd, sp.r / dd)
+          }
+        }
+      }
+      // write back: rotate each bone so its child lands on the solved particle
+      for (let i = 0; i < chain.length - 1; i++) {
+        const l = chain[i], child = chain[i + 1]
+        l.bone.quaternion.copy(l.restQ)
+        l.bone.updateWorldMatrix(true, false)
+        const bw = l.bone.getWorldPosition(_hv)
+        const wq = l.bone.getWorldQuaternion(_hq1)
+        _hrd.copy(l.childLocal).applyQuaternion(wq).normalize()
+        _hsd.copy(child.pos).sub(bw).normalize()
+        _hq2.setFromUnitVectors(_hrd, _hsd)
+        const pq = l.bone.parent.getWorldQuaternion(_hq3)
+        l.bone.quaternion.premultiply(pq.clone().invert().multiply(_hq2).multiply(pq))
+        l.bone.updateWorldMatrix(true, false)
+      }
+      // resync particles to the final bone positions for the next frame
+      for (const l of chain) l.bone.getWorldPosition(l.pos)
     }
   }
 
@@ -438,6 +572,7 @@ export async function loadMina() {
     },
     getBone: k => bones[k] || null,
     fingers: fingerBones,
+    hairParams,
     groundY,
     bodyHeight,
     frameHeight,

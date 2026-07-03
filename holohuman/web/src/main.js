@@ -228,6 +228,11 @@ danceBtn.onclick = () => {
 window.holo = {
   emotion: (n, i = 1, secs = 0) => behavior.setEmotion(n, i, secs),
   dance: on => { behavior.setDance(on ?? !behavior.dancing) },
+  // complex poses: holo.action('heart' | 'squat' | 'wave', seconds)
+  action: (name, secs = 4) => behavior.setAction(name, secs),
+  // live hair tuning, e.g. holo.hair({ stiffness: 0.3, gravityMultiplier: 1 })
+  // wind is a Vector3: holo.hair().wind.set(2, 0, 0) for a gust
+  hair: (p) => { if (p) Object.assign(avatar?.hairParams ?? {}, p); return avatar?.hairParams },
   pose: (bone, { x, y, z } = {}) => {
     const b = avatar?.getBone(bone)
     if (!b) return `unknown bone: ${bone}`

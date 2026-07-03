@@ -28,6 +28,42 @@ export const EMOTIONS = {
 }
 const EMO_KEYS = ['smile', 'jaw', 'squint', 'browUp', 'browSad', 'browDown', 'frown', 'eyeWide', 'tears', 'headX']
 
+// complex body actions: bone offsets from rest, blended in/out over ~0.3s.
+// Angles found empirically on this rig (z− lifts arms forward, thigh z+ =
+// forward pitch, calf z− = knee bend, foot z = ankle pitch).
+export const ACTIONS = {
+  heart: { // open heart above the head: elbows flared out, hands uncrossed
+    emotion: 'happy',
+    fingerCurl: 0.45,
+    bones: {
+      leftUpperArm: { y: 0.3, z: -2.0 }, rightUpperArm: { y: 0.3, z: -2.0 },
+      leftLowerArm: { y: 0.75, z: -1.15 }, rightLowerArm: { y: 0.75, z: -1.15 },
+      leftHand: { z: -0.55 }, rightHand: { z: -0.55 }, // wrists curve → heart arcs
+      head: { x: 0.08 }, // slight chin tuck
+    },
+  },
+  squat: { // deep squat, arms forward for balance, feet stay grounded
+    groundFeet: true,
+    bones: {
+      leftThigh: { z: 1.15 }, rightThigh: { z: 1.15 },
+      leftCalf: { z: -2.0 }, rightCalf: { z: -2.0 },
+      leftFoot: { z: 0.85 }, rightFoot: { z: 0.85 },
+      spine: { x: 0.15 }, chest: { x: 0.12 },
+      leftUpperArm: { z: -0.9 }, rightUpperArm: { z: -0.9 },
+      leftLowerArm: { z: -0.45 }, rightLowerArm: { z: -0.45 },
+    },
+  },
+  wave: { // friendly overhead wave with the right hand
+    emotion: 'happy',
+    bones: {
+      rightUpperArm: { y: -0.5, z: -1.9 },
+      rightLowerArm: { z: -0.9 },
+      head: { z: 0.1 },
+    },
+    wiggle: { bone: 'rightLowerArm', axis: 'y', amp: 0.35, freq: 4.2 },
+  },
+}
+
 export class Behavior {
   constructor(lipsync) {
     this.lip = lipsync
@@ -64,6 +100,9 @@ export class Behavior {
     // dance
     this.dancing = false; this.danceRestore = false; this.danceBlend = 0
     this.dancePhase = Math.random() * Math.PI * 2
+    // complex actions (squat, heart, wave …) + procedural jump
+    this.actionName = null; this.actionT = 0; this.actionBlend = 0; this._lastAct = null
+    this.jumpT = -1
   }
 
   setAvatar(a) {
@@ -91,6 +130,15 @@ export class Behavior {
     if (this.dancing && !on) this.danceRestore = true
     this.dancing = on
     if (on) this.dancePhase = performance.now() * 0.001 * 2 * Math.PI * (112 / 60)
+  }
+
+  // complex action by name ('squat' | 'heart' | 'wave' | 'jump'), held for `seconds`
+  setAction(name, seconds = 4) {
+    if (name === 'jump') { if (this.jumpT < 0) this.jumpT = 0; return true }
+    if (!ACTIONS[name]) return false
+    this.actionName = name
+    this.actionT = seconds
+    return true
   }
 
   // called by the pipeline for every sentence sent to TTS — auto emotion AND
@@ -347,7 +395,23 @@ export class Behavior {
     // stands like a person, not a swinging marionette.
     const breath = Math.sin(t * 1.6)
     const breath2 = Math.sin(t * 1.6 + 0.4)
-    a.scene.position.y = groundY
+    // ---------- jump: anticipation crouch → ballistic flight → landing absorb
+    let jumpAir = 0
+    this._jumpKnee = 0
+    if (this.jumpT >= 0) {
+      this.jumpT += dt
+      const T = this.jumpT
+      if (T < 0.18) {                       // load the legs
+        this._jumpKnee = (T / 0.18) * 0.55
+      } else if (T < 0.68) {                // airborne: v=2 m/s, g=8 → apex 25cm
+        const ft = T - 0.18
+        jumpAir = Math.max(0, 2 * ft - 4 * ft * ft)
+        this._jumpKnee = 0.3                // legs tuck in the air
+      } else if (T < 1.0) {                 // absorb the landing
+        this._jumpKnee = (1 - (T - 0.68) / 0.32) * 0.5
+      } else this.jumpT = -1
+    }
+    a.scene.position.y = groundY + jumpAir
     a.scene.rotation.y = 0
     const leanDrive = this.pose.lean + wobble(t, 0.08) * 0.008
     const twistDrive = this.pose.twist + (talking ? talkSway * 0.3 : 0)
@@ -386,28 +450,55 @@ export class Behavior {
       const r = restOf(c)
       setBone(c, { x: r.x, y: r.y, z: r.z + breath * 0.010 * sideC })
     }
-    // legs: feet stay planted — thigh takes a micro weight-shift, calf counters
-    // it and the foot counters again, so ankles never leave the floor
+    // pelvis: real weight shift — hips translate over the loaded leg (local x =
+    // world lateral, local z = world vertical) and dip as the knees soften;
+    // the thighs counter-swing so the feet stay planted (mini-IK).
+    const hips = a.getBone('hips')
+    const sc = a.scene.scale?.x || 1
+    let hipShift = 0
+    if (hips) {
+      if (!hips.userData.restPos) hips.userData.restPos = hips.position.clone()
+      const rp = hips.userData.restPos
+      hipShift = -this.pose.lean * 0.33 + wobble(t, 0.2) * 0.008
+      hips.position.x = rp.x + hipShift / sc
+      hips.position.z = rp.z - (((this._kneeAvg ?? 0.07) - 0.07) * 0.18) / sc
+    }
+    // legs: soft knees, never wooden. Measured axes: thigh z = fwd/back pitch,
+    // thigh y = lateral swing, calf z− = knee bend, foot z = ankle pitch.
+    // The loaded leg stands straighter, the free knee relaxes; the chain bends
+    // θ/2, −θ, +θ/2 so feet stay planted.
+    let kneeSum = 0
     for (const [tk, ck, fk, ph, sideL] of [
       ['leftThigh', 'leftCalf', 'leftFoot', 0.3, 1],
       ['rightThigh', 'rightCalf', 'rightFoot', 1.1, -1]]) {
-      const shift = wobble(t + ph, 0.07) * 0.010 + breath * 0.004
+      // lean right → left leg unloads and its knee softens (and vice versa)
+      const unload = clamp01(0.5 - sideL * this.pose.lean * 6)
+      const knee = 0.05 + unload * 0.09
+        + wobble(t + ph * 3, 0.55) * 0.05 + breath * 0.012 + (this._jumpKnee || 0)
+      kneeSum += knee
       const thigh = a.getBone(tk)
       if (thigh) {
         const r = restOf(thigh)
-        setBone(thigh, { x: r.x + shift, y: r.y, z: r.z + leanDrive * 0.08 * sideL })
+        setBone(thigh, {
+          x: r.x,
+          // counter the pelvis shift (y+ swings the foot center-ward) so the
+          // feet hold their ground while the hips travel
+          y: r.y + leanDrive * 0.05 * sideL + hipShift * 1.2,
+          z: r.z + knee * 0.5,
+        })
       }
       const calf = a.getBone(ck)
       if (calf) {
         const r = restOf(calf)
-        setBone(calf, { x: r.x - shift * 1.7, y: r.y, z: r.z })
+        setBone(calf, { x: r.x, y: r.y, z: r.z - knee })
       }
       const foot = a.getBone(fk)
       if (foot) {
         const r = restOf(foot)
-        setBone(foot, { x: r.x + shift * 0.7, y: r.y, z: r.z })
+        setBone(foot, { x: r.x, y: r.y, z: r.z + knee * 0.5 })
       }
     }
+    this._kneeAvg = kneeSum / 2
     // ---------- arms. Axes measured on this rig (both sides mirrored):
     // z− lifts the upper arm forward / bends the elbow forward, y− flares out.
     // While talking: conversational gestures — a new arm pose every ~2s, elbows
@@ -481,6 +572,50 @@ export class Behavior {
         setBone(hand, s)
       }
     }
+
+    // ---------- complex actions (squat, heart, wave): blended pose override
+    this.actionT -= dt
+    if (this.actionT <= 0) this.actionName = null
+    const act = ACTIONS[this.actionName]
+    if (act) this._lastAct = act
+    this.actionBlend += ((act ? 1 : 0) - this.actionBlend) * (1 - Math.exp(-dt * 6))
+    if (this.actionBlend > 0.02 && this._lastAct) {
+      const A = this._lastAct
+      const w = this.actionBlend
+      for (const [k, off] of Object.entries(A.bones)) {
+        const bb = a.getBone(k)
+        if (!bb) continue
+        const r = restOf(bb)
+        bb.rotation.x += (r.x + (off.x || 0) - bb.rotation.x) * w
+        bb.rotation.y += (r.y + (off.y || 0) - bb.rotation.y) * w
+        bb.rotation.z += (r.z + (off.z || 0) - bb.rotation.z) * w
+      }
+      if (A.wiggle) { // e.g. the wave: oscillate one joint while held
+        const wb = a.getBone(A.wiggle.bone)
+        if (wb) wb.rotation[A.wiggle.axis] += Math.sin(t * A.wiggle.freq * Math.PI * 2) * A.wiggle.amp * w
+      }
+      if (A.fingerCurl && a.fingers)
+        for (const list of [a.fingers.left, a.fingers.right])
+          for (const fb of list)
+            fb.rotation.z += A.fingerCurl * 0.35 * w * (fb.name.startsWith('thumb') ? 0.3 : 1)
+      // adaptive grounding: sink the pelvis until the feet touch the floor,
+      // whatever the leg pose is. Accumulated in _ground because the body code
+      // rewrites hips.position every frame.
+      if (A.groundFeet) {
+        const foot = a.getBone('leftFoot'), hipsA = a.getBone('hips')
+        if (foot && hipsA) {
+          hipsA.position.z -= (this._ground || 0) / (a.scene.scale?.x || 1)
+          foot.updateWorldMatrix(true, false)
+          const err = foot.matrixWorld.elements[13] - 0.1 // rest ankle height
+          this._ground = (this._ground || 0) + err * 0.5
+          hipsA.position.z -= (err * 0.5) / (a.scene.scale?.x || 1)
+        }
+      } else {
+        this._ground = (this._ground || 0) * (1 - w)
+      }
+      if (act && A.emotion) this.setEmotion(A.emotion, 0.8, 0.4)
+    }
+    if (this.actionBlend <= 0.02) this._ground = 0
   }
 
   // 112 BPM K-pop groove: staggered limbs, hip-led weight, hands alive — not stiff sine puppet
@@ -506,9 +641,20 @@ export class Behavior {
     }
     // hips lead the groove: side-to-side weight + twist — the butt moves, and
     // the torso counters above it so it reads as dance, not a pinned pelvis
-    // measured: every hips axis tilts the legs (0.87m lever) — tiny angles are
-    // real weight shifts; the groove reads from bounce + torso counter-sway
-    danceBone('hips', sway, 0.02, 0.035, 0.015)
+    // hip wiggle: the pelvis translates side-to-side on the half-beat and
+    // cocks into it — the thigh counter below keeps the feet on their spot
+    const wig = Math.sin(B / 2 + 0.4)
+    const hipsB = a.getBone('hips')
+    const sc = a.scene.scale?.x || 1
+    let hipWig = 0
+    if (hipsB) {
+      if (!hipsB.userData.restPos) hipsB.userData.restPos = hipsB.position.clone()
+      const rp = hipsB.userData.restPos
+      hipWig = wig * 0.05 * blend
+      hipsB.position.x = rp.x + hipWig / sc
+      hipsB.position.z = rp.z // vertical comes from the scene hop
+    }
+    danceBone('hips', wig, 0.025, 0.09, 0.03)
     // trimmed amplitudes: groove without pushing hands/torso into each other
     const dTorso = hit * 0.6 + sway * 0.4
     danceBone('spine', dTorso - bounce * 0.2, 0.3, 0.35)
@@ -516,9 +662,23 @@ export class Behavior {
     danceBone('neck', dTorso * 0.6 + half * 0.4, 0.3, 0.25)
     danceBone('head', dTorso * 0.7 + wobble(t, 0.4) * 0.1, 0.35, 0.3)
 
-    // legs step in place — thigh z = forward/back pitch (measured), alternating
-    danceBone('leftThigh', bounce * 0.55 + hit * 0.35, 0, 0.02, 0.08)
-    danceBone('rightThigh', -(bounce * 0.5 + hit * 0.28), 0, -0.018, 0.075)
+    // legs: step in place — thighs alternate a forward lift on the beat
+    // (thigh z+ = forward), the lifted leg's knee bends deep and the ankle
+    // follows through; the standing leg counter-swings (thigh y) to cancel
+    // the pelvis wiggle so the planted foot keeps its spot
+    const stepL = Math.max(0, Math.sin(B))
+    const stepR = Math.max(0, Math.sin(B + Math.PI))
+    // net foot push from the pelvis (translation +0.05, lean −0.079) is
+    // −0.029·wig; thigh y at −0.84 m/rad cancels it with −0.034·wig
+    const wigCounter = wig * -0.034
+    danceBone('leftThigh', 1, 0, wigCounter + stepR * 0.02, stepL * 0.16 + bounce * 0.04)
+    danceBone('rightThigh', 1, 0, wigCounter - stepL * 0.02, stepR * 0.16 + bounce * 0.035)
+    const kneeL = 0.08 + bounce * 0.15 + stepL * 0.35
+    const kneeR = 0.08 + bounce * 0.15 + stepR * 0.35
+    danceBone('leftCalf', kneeL, 0, 0, -1)
+    danceBone('rightCalf', kneeR, 0, 0, -1)
+    danceBone('leftFoot', kneeL, 0, 0, 0.45)
+    danceBone('rightFoot', kneeR, 0, 0, 0.45)
 
     const lArm = beat * 0.5 + hit * 0.35 + Math.sin(B + 0.4) * 0.2
     const rArm = -beat * 0.5 - hit * 0.3 + Math.sin(B + Math.PI + 0.2) * 0.2
