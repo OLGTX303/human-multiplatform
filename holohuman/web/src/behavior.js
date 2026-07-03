@@ -41,6 +41,11 @@ export const ACTIONS = {
       leftHand: { z: -0.55 }, rightHand: { z: -0.55 }, // wrists curve → heart arcs
       head: { x: 0.08 }, // slight chin tuck
     },
+    via: { // arms rise out to the SIDES first, then close overhead — the
+      // straight blend path sweeps the hands through the face/chest
+      leftUpperArm: { y: -0.55, z: -1.1 }, rightUpperArm: { y: -0.55, z: -1.1 },
+      leftLowerArm: { y: 0.2, z: -0.5 }, rightLowerArm: { y: 0.2, z: -0.5 },
+    },
   },
   squat: { // deep squat, arms forward for balance, feet stay grounded
     groundFeet: true,
@@ -49,8 +54,9 @@ export const ACTIONS = {
       leftCalf: { z: -2.0 }, rightCalf: { z: -2.0 },
       leftFoot: { z: 0.85 }, rightFoot: { z: 0.85 },
       spine: { x: 0.15 }, chest: { x: 0.12 },
-      leftUpperArm: { z: -0.9 }, rightUpperArm: { z: -0.9 },
-      leftLowerArm: { z: -0.45 }, rightLowerArm: { z: -0.45 },
+      // arms angle outward around the chest — straight forward grazes it
+      leftUpperArm: { y: -0.22, z: -0.9 }, rightUpperArm: { y: -0.22, z: -0.9 },
+      leftLowerArm: { y: 0.1, z: -0.5 }, rightLowerArm: { y: 0.1, z: -0.5 },
     },
   },
   wave: { // friendly overhead wave with the right hand
@@ -60,6 +66,7 @@ export const ACTIONS = {
       rightLowerArm: { z: -0.9 },
       head: { z: 0.1 },
     },
+    via: { rightUpperArm: { y: -0.75, z: -1.0 }, rightLowerArm: { z: -0.4 } }, // arc out, not through the hair/head
     wiggle: { bone: 'rightLowerArm', axis: 'y', amp: 0.35, freq: 4.2 },
   },
 }
@@ -97,9 +104,8 @@ export class Behavior {
     // emotion state: explicit (from UI/API) or pulsed (from sentence cues)
     this.emoName = 'neutral'; this.emoIntensity = 1; this.emoPulseT = 0; this.emoLocked = false
     this.emo = Object.fromEntries(EMO_KEYS.map(k => [k, 0]))
-    // dance
-    this.dancing = false; this.danceRestore = false; this.danceBlend = 0
-    this.dancePhase = Math.random() * Math.PI * 2
+    // dance (clip-driven via the avatar's AnimationMixer)
+    this.dancing = false; this.danceRestore = false
     // complex actions (squat, heart, wave …) + procedural jump
     this.actionName = null; this.actionT = 0; this.actionBlend = 0; this._lastAct = null
     this.jumpT = -1
@@ -126,10 +132,16 @@ export class Behavior {
     this.gazeT = Math.max(this.gazeT, 0.8) // hold on the cursor before saccading away
   }
 
+  // clip-driven dance (sample mechanism): plays the mocap FBX via the avatar's
+  // AnimationMixer. Returns false when no dance clip is available on this avatar.
   setDance(on) {
-    if (this.dancing && !on) this.danceRestore = true
-    this.dancing = on
-    if (on) this.dancePhase = performance.now() * 0.001 * 2 * Math.PI * (112 / 60)
+    const d = this.avatar?.dance
+    if (on && !d?.available) return false
+    if (!!on === this.dancing) return true
+    this.dancing = !!on
+    if (on) { d.start(); this.setEmotion('happy', 0.8, 2) }
+    else { d?.stop(); this.danceRestore = true }
+    return true
   }
 
   // complex action by name ('squat' | 'heart' | 'wave' | 'jump'), held for `seconds`
@@ -355,12 +367,10 @@ export class Behavior {
       }
     }
 
-    // ---------- dance overrides body + arms; blend in/out so it never snaps stiff
-    const danceK = 1 - Math.exp(-dt * (this.dancing ? 10 : 14))
-    this.danceBlend += ((this.dancing ? 1 : 0) - this.danceBlend) * danceK
-    if (this.danceBlend > 0.02) {
-      this.updateDance(dt, t, this.danceBlend)
-      if (this.danceBlend > 0.92) return
+    // ---------- dance: while the clip plays, the AnimationMixer owns the body
+    // (it runs after us in avatar.update); face/emotion channels above stay live
+    if (this.dancing || a.dance?.busy) {
+      this.smileTarget = Math.max(this.smileTarget, 0.7)
       return
     }
     const groundY = a.groundY ?? 0
@@ -582,13 +592,23 @@ export class Behavior {
     if (this.actionBlend > 0.02 && this._lastAct) {
       const A = this._lastAct
       const w = this.actionBlend
+      // path through the optional `via` mid-pose: limbs arc AROUND the body
+      // (out to the side, then to the target) instead of blending straight
+      // through the torso/face — same arc in reverse on release
+      const path = (k, axis, off) => {
+        const tgt = off[axis] || 0
+        const via = A.via?.[k]
+        if (!via) return tgt
+        const mid = via[axis] ?? tgt * 0.5
+        return w < 0.5 ? mid * (w / 0.5) : mid + (tgt - mid) * ((w - 0.5) / 0.5)
+      }
       for (const [k, off] of Object.entries(A.bones)) {
         const bb = a.getBone(k)
         if (!bb) continue
         const r = restOf(bb)
-        bb.rotation.x += (r.x + (off.x || 0) - bb.rotation.x) * w
-        bb.rotation.y += (r.y + (off.y || 0) - bb.rotation.y) * w
-        bb.rotation.z += (r.z + (off.z || 0) - bb.rotation.z) * w
+        bb.rotation.x += (r.x + path(k, 'x', off) - bb.rotation.x) * w
+        bb.rotation.y += (r.y + path(k, 'y', off) - bb.rotation.y) * w
+        bb.rotation.z += (r.z + path(k, 'z', off) - bb.rotation.z) * w
       }
       if (A.wiggle) { // e.g. the wave: oscillate one joint while held
         const wb = a.getBone(A.wiggle.bone)
@@ -618,86 +638,4 @@ export class Behavior {
     if (this.actionBlend <= 0.02) this._ground = 0
   }
 
-  // 112 BPM K-pop groove: staggered limbs, hip-led weight, hands alive — not stiff sine puppet
-  updateDance(dt, t, blend) {
-    const a = this.avatar
-    const B = t * 2 * Math.PI * (112 / 60)
-    const beat = Math.sin(B)
-    const half = Math.sin(B / 2)
-    const hit = Math.pow(Math.max(0, beat), 0.55)          // sharper downbeats
-    const bounce = 1 - Math.abs(half)
-    const sway = Math.sin(B / 2 + 0.9) * 0.5 + Math.sin(B / 4 + 2.1) * 0.5
-
-    this.smileTarget = 0.7 + hit * 0.15
-    const groundY = a.groundY ?? 0
-    // beat bounce: a small hop up on the downbeat (never dips feet under floor)
-    a.scene.position.y = groundY + bounce * 0.03 * blend
-    a.scene.rotation.y = (sway * 0.045 + wobble(t, 0.35) * 0.012) * blend
-
-    const danceBone = (k, driver, px = 0, py = 0, pz = 0) => {
-      const b = a.getBone(k)
-      if (!b) return
-      setBone(b, addB(restOf(b), bundle(driver * blend, px, py, pz)))
-    }
-    // hips lead the groove: side-to-side weight + twist — the butt moves, and
-    // the torso counters above it so it reads as dance, not a pinned pelvis
-    // hip wiggle: the pelvis translates side-to-side on the half-beat and
-    // cocks into it — the thigh counter below keeps the feet on their spot
-    const wig = Math.sin(B / 2 + 0.4)
-    const hipsB = a.getBone('hips')
-    const sc = a.scene.scale?.x || 1
-    let hipWig = 0
-    if (hipsB) {
-      if (!hipsB.userData.restPos) hipsB.userData.restPos = hipsB.position.clone()
-      const rp = hipsB.userData.restPos
-      hipWig = wig * 0.05 * blend
-      hipsB.position.x = rp.x + hipWig / sc
-      hipsB.position.z = rp.z // vertical comes from the scene hop
-    }
-    danceBone('hips', wig, 0.025, 0.09, 0.03)
-    // trimmed amplitudes: groove without pushing hands/torso into each other
-    const dTorso = hit * 0.6 + sway * 0.4
-    danceBone('spine', dTorso - bounce * 0.2, 0.3, 0.35)
-    danceBone('chest', dTorso - half * 0.3, 0.28, -0.28)
-    danceBone('neck', dTorso * 0.6 + half * 0.4, 0.3, 0.25)
-    danceBone('head', dTorso * 0.7 + wobble(t, 0.4) * 0.1, 0.35, 0.3)
-
-    // legs: step in place — thighs alternate a forward lift on the beat
-    // (thigh z+ = forward), the lifted leg's knee bends deep and the ankle
-    // follows through; the standing leg counter-swings (thigh y) to cancel
-    // the pelvis wiggle so the planted foot keeps its spot
-    const stepL = Math.max(0, Math.sin(B))
-    const stepR = Math.max(0, Math.sin(B + Math.PI))
-    // net foot push from the pelvis (translation +0.05, lean −0.079) is
-    // −0.029·wig; thigh y at −0.84 m/rad cancels it with −0.034·wig
-    const wigCounter = wig * -0.034
-    danceBone('leftThigh', 1, 0, wigCounter + stepR * 0.02, stepL * 0.16 + bounce * 0.04)
-    danceBone('rightThigh', 1, 0, wigCounter - stepL * 0.02, stepR * 0.16 + bounce * 0.035)
-    const kneeL = 0.08 + bounce * 0.15 + stepL * 0.35
-    const kneeR = 0.08 + bounce * 0.15 + stepR * 0.35
-    danceBone('leftCalf', kneeL, 0, 0, -1)
-    danceBone('rightCalf', kneeR, 0, 0, -1)
-    danceBone('leftFoot', kneeL, 0, 0, 0.45)
-    danceBone('rightFoot', kneeR, 0, 0, 0.45)
-
-    const lArm = beat * 0.5 + hit * 0.35 + Math.sin(B + 0.4) * 0.2
-    const rArm = -beat * 0.5 - hit * 0.3 + Math.sin(B + Math.PI + 0.2) * 0.2
-    // measured rig axes: upper/lower z− = forward lift/bend, y− = outward.
-    // Outward bias + forward lift keep hands in front of the body, never
-    // crossing into the torso or skirt.
-    const danceLimb = (upperK, lowerK, handK, drive) => {
-      const wrist = Math.sin(B + drive * 0.5) * 0.06
-      danceBone(upperK, 1,
-        0,
-        drive * 0.2 - 0.16,                       // swing, biased outward (y−)
-        -(0.15 + Math.max(0, drive) * 0.3))       // elbows lift forward (z−)
-      danceBone(lowerK, 1,
-        0,
-        -drive * 0.12,
-        -(0.5 + Math.max(0, drive) * 0.4))        // real elbow bend (z−)
-      danceBone(handK, 1, 0, wrist, wrist * 0.5)
-    }
-    danceLimb('leftUpperArm', 'leftLowerArm', 'leftHand', lArm)
-    danceLimb('rightUpperArm', 'rightLowerArm', 'rightHand', rArm)
-  }
 }

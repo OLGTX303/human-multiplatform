@@ -325,14 +325,22 @@ export async function loadMina() {
   const hairColliders = []
   {
     const C = (bone, r, dy = 0) => bone && hairColliders.push({ bone, r, dy })
+    // midpoint collider between two bones — fills the gaps single spheres leave
+    const M = (a, b, f, r) => a && b && hairColliders.push({ bone: a, bone2: b, f, r, dy: 0 })
     C(bones.head, 0.095, 0.02)
-    C(bones.neck, 0.055)
-    C(bones.chest, 0.12)
-    C(bones.spine, 0.115)          // upper back — long strands rest on it, not in it
-    C(bones.leftClavicle, 0.06)
-    C(bones.rightClavicle, 0.06)
-    C(bones.leftUpperArm, 0.055)
-    C(bones.rightUpperArm, 0.055)
+    C(bones.neck, 0.06)
+    C(bones.chest, 0.125)
+    C(bones.spine, 0.12)           // upper back — long strands rest on it, not in it
+    C(bones.leftClavicle, 0.07)
+    C(bones.rightClavicle, 0.07)
+    // shoulder line: strands drape OVER the clavicle→deltoid ridge instead of
+    // slipping through the gap between the old clavicle and upper-arm spheres
+    M(bones.leftClavicle, bones.leftUpperArm, 0.55, 0.075)
+    M(bones.rightClavicle, bones.rightUpperArm, 0.55, 0.075)
+    C(bones.leftUpperArm, 0.07)
+    C(bones.rightUpperArm, 0.07)
+    M(bones.leftUpperArm, bones.leftLowerArm, 0.35, 0.06)
+    M(bones.rightUpperArm, bones.rightLowerArm, 0.35, 0.06)
   }
 
   console.log('[mina] bones found:', Object.keys(bones).join(','),
@@ -495,6 +503,10 @@ export async function loadMina() {
     for (const c of hairColliders) {
       c.bone.updateWorldMatrix(true, false)
       const s = c.bone.getWorldPosition(new THREE.Vector3())
+      if (c.bone2) { // midpoint collider (shoulder ridge, upper-arm segment)
+        c.bone2.updateWorldMatrix(true, false)
+        s.lerp(c.bone2.getWorldPosition(_ht), c.f)
+      }
       s.y += c.dy
       spheres.push({ c: s, r: c.r + p.collisionRadius })
     }
@@ -557,9 +569,69 @@ export async function loadMina() {
     }
   }
 
+  // ---- dance: clip-driven, the sample project's mechanism (its Unity animator
+  // plays mocap FBX clips; same Character-Creator rig => clips drive Mina
+  // directly, no retargeting). The sample folder shipped without the dance
+  // FBXs, so we auto-load one from models/ when the user provides it.
+  const mixer = new THREE.AnimationMixer(fbx)
+  let danceAction = null
+  ;(async () => {
+    for (const url of [DIR + 'dance.fbx', '/models/dance.fbx']) {
+      try {
+        const anim = await new FBXLoader().loadAsync(url)
+        const clip = anim.animations.find(c => c.duration > 1)
+        if (clip) {
+          // position tracks live in the source rig's own origin — keep only the
+          // pelvis one (root bounce/steps), re-anchored onto Mina's rest pelvis,
+          // and drop the rest so the clip can't teleport or stretch the body
+          for (let i = clip.tracks.length - 1; i >= 0; i--) {
+            const tr = clip.tracks[i]
+            if (!tr.name.endsWith('.position')) continue
+            const bone = fbx.getObjectByName(tr.name.split('.')[0])
+            if (!bone || !/pelvis|hips/i.test(bone.name)) { clip.tracks.splice(i, 1); continue }
+            const v = tr.values, rest = bone.position
+            const ox = v[0] - rest.x, oy = v[1] - rest.y, oz = v[2] - rest.z
+            for (let j = 0; j < v.length; j += 3) { v[j] -= ox; v[j + 1] -= oy; v[j + 2] -= oz }
+          }
+          danceAction = mixer.clipAction(clip)
+          console.log('[mina] dance clip:', url, clip.duration.toFixed(1) + 's,', clip.tracks.length, 'tracks')
+          break
+        }
+      } catch { /* no dance clip at this path */ }
+    }
+  })()
+  let poseSnap = null
+  let danceStopping = false
+  const dance = {
+    get available() { return !!danceAction },
+    get busy() { return !!danceAction && danceAction.isRunning() },
+    start() {
+      if (!danceAction) return
+      danceStopping = false
+      // clips animate bone POSITIONS too (pelvis root motion) — snapshot the
+      // whole skeleton so stop() can hand a clean pose back to the behavior engine
+      poseSnap = []
+      fbx.traverse(o => { if (o.isBone) poseSnap.push([o, o.position.clone(), o.quaternion.clone()]) })
+      danceAction.reset().fadeIn(0.5).play()
+    },
+    stop() {
+      if (!danceAction) return
+      danceAction.fadeOut(0.6)
+      danceStopping = true // finalized frame-side in tick() — timers get throttled
+    },
+    tick() {
+      if (danceStopping && danceAction && danceAction.getEffectiveWeight() <= 0.001) {
+        danceStopping = false
+        danceAction.stop()
+        if (poseSnap) for (const [b, p, q] of poseSnap) { b.position.copy(p); b.quaternion.copy(q) }
+      }
+    },
+  }
+
   return {
     scene: fbx,
     isMina: true,
+    dance,
     channels: {
       jaw, funnel, stretch, blink, browUp, browSad, browDown, frown, squint, eyeWide,
       lipPress, lipUpper, lipLower, lipSideL, lipSideR, lipRollU, lipRollL,
@@ -577,6 +649,7 @@ export async function loadMina() {
     bodyHeight,
     frameHeight,
     lookHeight: 1.35,
-    update: (dt) => { updateSkirt(dt); updateHair(dt, performance.now() * 0.001) },
+    // mixer first: while a clip plays it owns the skeleton; skirt/hair react to it
+    update: (dt) => { mixer.update(dt); dance.tick(); updateSkirt(dt); updateHair(dt, performance.now() * 0.001) },
   }
 }

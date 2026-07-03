@@ -235,7 +235,12 @@ document.getElementById('emotion').onchange = e => {
 }
 const danceBtn = document.getElementById('dance')
 danceBtn.onclick = () => {
-  behavior.setDance(!behavior.dancing)
+  if (!behavior.setDance(!behavior.dancing)) {
+    // the sample project shipped without its dance mocap FBXs — tell the user
+    // where to drop one (any Character-Creator-rig clip plays directly)
+    pipeline.subtitle('💃 needs a dance clip — put one at holohuman/models/mina/dance.fbx')
+    setTimeout(() => pipeline.subtitle(''), 5000)
+  }
   danceBtn.style.background = behavior.dancing ? '#7a3a8a' : ''
 }
 // action (动作), role (角色), voice (语种), camera view (视角切换)
