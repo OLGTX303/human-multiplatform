@@ -6,6 +6,12 @@ import { AutoAsr } from './asr.js'
 
 const SENTENCE_END = /([。！？；!?;]|\.\s|\n)/
 const ASR_LANG = { en: 'en-US', zh: 'zh-CN', ja: 'ja-JP', ko: 'ko-KR' }
+const CONTROL_RE = /<control>\s*([\s\S]*?)<\/control>/g
+// hide an unclosed trailing <control> tag from what we speak/show
+const hideOpenControl = t => {
+  const i = t.lastIndexOf('<control>')
+  return i >= 0 && t.indexOf('</control>', i) < 0 ? t.slice(0, i) : t
+}
 
 // ---------------------------------------------------------------- local brain
 // ponytail: rule-based companion replies — keeps her responsive when the
@@ -105,7 +111,10 @@ export class Pipeline {
       "Hi! I've been waiting for you. What should we do today?",
     ])
     this.addMsg('bot', line)
-    this.enqueueLocal(line, this.gen)
+    // greet with the real TTS voice (af_heart) when the backend is up — the
+    // browser speechSynthesis fallback sounds robotic
+    if (this.online) this.enqueueSpeech(line, this.gen)
+    else this.enqueueLocal(line, this.gen)
   }
 
   // switch persona (角色) — clears history so the old role doesn't bleed through
@@ -166,23 +175,34 @@ export class Pipeline {
           if (msg.error) { this.subtitle('⚠ ' + msg.error); return }
           full += msg.delta
           pending += msg.delta
-          this.subtitle(full)
+          // pull out any completed <control>{...}</control> blocks and apply them —
+          // they drive her body/appearance and are never spoken or shown
+          full = this.applyControls(full)
+          pending = this.applyControls(pending)
+          const shown = hideOpenControl(full)
+          this.subtitle(shown)
           // stream the reply into a live chat bubble
           if (!bubble) bubble = this.addMsg('bot', '')
-          bubble.textContent = full
+          bubble.textContent = shown
           this.$chat.scrollTop = this.$chat.scrollHeight
-          // flush complete sentences to TTS while still streaming
-          let m
-          while ((m = SENTENCE_END.exec(pending))) {
-            const sentence = pending.slice(0, m.index + m[0].length).trim()
-            pending = pending.slice(m.index + m[0].length)
+          // flush complete sentences to TTS — but never cut into an open control tag
+          const cut = pending.indexOf('<control>')
+          const speakable = cut >= 0 ? pending.slice(0, cut) : pending
+          let off = 0, m
+          while ((m = SENTENCE_END.exec(speakable.slice(off)))) {
+            const idx = off + m.index + m[0].length
+            const sentence = speakable.slice(off, idx).trim()
+            off = idx
             if (sentence) this.enqueueSpeech(sentence, gen)
           }
+          pending = pending.slice(off)  // keep the tail (incl. any partial control tag)
         }
       }
       if (this.gen !== gen) return
-      if (pending.trim()) this.enqueueSpeech(pending.trim(), gen)
-      this.messages.push({ role: 'assistant', content: full })
+      pending = this.applyControls(pending)
+      const tail = hideOpenControl(pending).trim()
+      if (tail) this.enqueueSpeech(tail, gen)
+      this.messages.push({ role: 'assistant', content: hideOpenControl(this.applyControls(full)) })
       this.speechDone = this.speechDone.then(() => { if (this.gen === gen) this.subtitle('') })
     } catch (e) {
       // backend died mid-conversation: never leave dead air — answer locally
@@ -267,6 +287,15 @@ export class Pipeline {
     }
     this.speechBusy = false
     this.asr?.resume()
+  }
+
+  // extract & apply completed <control>{...}</control> blocks, return text without them
+  applyControls(text) {
+    return text.replace(CONTROL_RE, (_, json) => {
+      try { window.applyControl?.(JSON.parse(json.trim())) }
+      catch (e) { console.warn('bad control json:', json, e) }
+      return ''
+    })
   }
 
   subtitle(t) {

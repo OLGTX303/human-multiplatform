@@ -47,3 +47,30 @@ terminals/
 
 # large local scratch dump — not part of the repo
 /human/
+
+# human_u6 (Unity 6 migration project) — ship code + light config only.
+# The character model, mocap library and dance clips are large binary art
+# assets (multi-GB); keep them local, add your own copies from the same
+# source the original project used.
+human_u6/Library/
+human_u6/Temp/
+human_u6/Logs/
+human_u6/obj/
+human_u6/UserSettings/
+human_u6/Builds/
+human_u6/*.csproj
+human_u6/*.sln
+human_u6/*.slnx
+human_u6/*.exe
+human_u6/.vscode/
+
+# large art/animation binaries
+human_u6/Assets/KPOP_Mina/
+human_u6/Assets/animo/
+human_u6/Assets/Animations/*.fbx
+human_u6/Assets/Animations/*.anim
+human_u6/Assets/Animations/Dance/
+human_u6/Assets/Typeface/*.ttf
+human_u6/Assets/Sprites/*.psd
+human_u6/Assets/Resources/Outfits/*.png
+human_u6/Assets/Resources/Outfits/*.psd
