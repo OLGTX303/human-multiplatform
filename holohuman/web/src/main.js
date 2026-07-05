@@ -116,7 +116,7 @@ async function loadVRM(url) {
 }
 
 // default character: KPOP_Mina (FBX). Fallback: any avatar.vrm. Drag-drop .vrm/.fbx to swap.
-loadMina().then(setAvatar).catch(e => {
+loadMina().then(a => { setAvatar(a); refreshOutfitOptions(a) }).catch(e => {
   console.warn('mina load failed, trying avatar.vrm', e)
   loadVRM('/models/avatar.vrm').catch(() =>
     document.getElementById('hint').classList.remove('hidden'))
@@ -257,6 +257,31 @@ document.getElementById('role').onchange = e => {
   behavior.setEmotion('happy', 0.8, 2) // acknowledge the switch
 }
 document.getElementById('voice').onchange = e => { pipeline.voice = e.target.value || null }
+document.getElementById('outfit').onchange = e => {
+  const v = e.target.value
+  if (v && avatar?.setOutfit?.(v)) behavior.setEmotion('happy', 0.7, 1.5) // show off the new fit
+}
+document.getElementById('eye').onchange = e => { if (e.target.value) avatar?.setEyeColor?.(e.target.value) }
+document.getElementById('hair').onchange = e => { if (e.target.value) avatar?.setHairColor?.(e.target.value) }
+// full garment switch: load a different outfit FBX and swap the whole avatar,
+// then rebuild the colour dropdown to match that garment's palette
+let currentGarment = 'casual'
+function refreshOutfitOptions(a) {
+  const sel = document.getElementById('outfit')
+  sel.innerHTML = '<option value="">👗 Colour</option>' +
+    (a.outfits || []).map(k => `<option value="${k}">${k[0].toUpperCase() + k.slice(1)}</option>`).join('')
+}
+document.getElementById('garment').onchange = async e => {
+  const g = e.target.value
+  if (!g || g === currentGarment) return
+  try {
+    const a = await loadMina(g)
+    currentGarment = g
+    setAvatar(a)
+    refreshOutfitOptions(a)
+    behavior.setEmotion('happy', 0.85, 2)
+  } catch (err) { console.warn('garment load failed:', err); e.target.value = currentGarment }
+}
 document.getElementById('view').onclick = cycleView
 // public API — full manual control from the console or embedding page:
 //   holo.emotion('laugh')            sustained emotion (or (name, 0..1, seconds) to pulse)
@@ -269,6 +294,14 @@ window.holo = {
   dance: on => behavior.setDance(on ?? !behavior.dancing),
   // complex poses: holo.action('heart' | 'squat' | 'wave', seconds)
   action: (name, secs = 4) => behavior.setAction(name, secs),
+  // recolour the current outfit: holo.outfit('pink'|'white'|'black'|...) — no arg lists options
+  outfit: key => key ? avatar?.setOutfit?.(key) : avatar?.outfits,
+  // full garment swap: holo.garment('casual'|'performance')
+  garment: g => document.getElementById('garment').value !== g
+    ? (document.getElementById('garment').value = g, document.getElementById('garment').dispatchEvent(new Event('change')))
+    : null,
+  eye: key => key ? avatar?.setEyeColor?.(key) : avatar?.eyeColors,       // holo.eye('blue'|'green'|...)
+  hairColor: key => key ? avatar?.setHairColor?.(key) : avatar?.hairColors, // holo.hairColor('black'|'blonde'|...)
   // live hair tuning, e.g. holo.hair({ stiffness: 0.3, gravityMultiplier: 1 })
   // wind is a Vector3: holo.hair().wind.set(2, 0, 0) for a gust
   hair: (p) => { if (p) Object.assign(avatar?.hairParams ?? {}, p); return avatar?.hairParams },
@@ -287,6 +320,31 @@ window.holo = {
     'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand',
     'leftThigh', 'rightThigh', 'leftCalf', 'rightCalf', 'leftFoot', 'rightFoot']
     .filter(k => avatar?.getBone(k)),
+  // pose ANY bone/finger by its raw rig name (e.g. 'index_02_l'), radians
+  poseBone: (name, rot = {}) => avatar?.poseBone?.(name, rot),
+  nail: key => avatar?.setNailColor?.(key),
+}
+
+// ---------------------------------------------------------------- LLM control
+// The chat backend embeds a <control>{...}</control> JSON block in its reply;
+// pipeline.js strips it from speech and calls this to drive her body + look.
+// Every field is optional — the model sends only what it wants to change.
+window.applyControl = (c) => {
+  if (!c || typeof c !== 'object') return
+  try {
+    if (c.emotion) behavior.setEmotion(c.emotion, c.intensity ?? 1, c.hold ?? 0)
+    if ('dance' in c) behavior.setDance(c.dance === 'stop' || c.dance === false ? false : c.dance)
+    if (c.action) behavior.setAction(c.action, c.seconds ?? 5)
+    if (Array.isArray(c.look)) behavior.lookToward(c.look[0], c.look[1])
+    if (c.eye) avatar?.setEyeColor?.(c.eye)
+    if (c.hair) avatar?.setHairColor?.(c.hair)
+    if (c.nail) avatar?.setNailColor?.(c.nail)
+    if (c.dress) avatar?.setOutfit?.(c.dress)
+    if (c.garment) window.holo.garment(c.garment)
+    // precise joint / finger control: { "leftLowerArm": {"z":-1.2}, "index_02_r": {"z":0.6} }
+    if (c.pose && typeof c.pose === 'object')
+      for (const [b, r] of Object.entries(c.pose)) avatar?.poseBone?.(b, r || {})
+  } catch (e) { console.warn('applyControl failed:', e) }
 }
 
 const clock = new THREE.Clock()

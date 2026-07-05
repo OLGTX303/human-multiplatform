@@ -202,7 +202,20 @@ export class AutoAsr {
     state.busy = true
     this.onPartial('…')
     try {
-      const blob = encodeWav(samples, state.ctx.sampleRate)
+      // downsample to 16k before upload: whisper resamples to 16k anyway, so
+      // 48k WAV is 3x the bytes for zero gain (linear interp is fine for speech)
+      const srcRate = state.ctx.sampleRate
+      let out = samples, rate = srcRate
+      if (srcRate > 16000) {
+        rate = 16000
+        const ratio = srcRate / rate
+        out = new Float32Array(Math.floor(samples.length / ratio))
+        for (let i = 0; i < out.length; i++) {
+          const p = i * ratio, j = Math.floor(p), f = p - j
+          out[i] = samples[j] * (1 - f) + (samples[j + 1] ?? samples[j]) * f
+        }
+      }
+      const blob = encodeWav(out, rate)
       const fd = new FormData()
       fd.append('audio', blob, 'speech.wav')
       const r = await fetch('/api/asr', { method: 'POST', body: fd })

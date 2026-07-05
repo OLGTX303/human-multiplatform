@@ -66,13 +66,14 @@ export const ACTIONS = {
     // vs head top (0, 1.60); the old y:−0.5 put it at (+0.15, 1.48, 0.18) = in
     // front of the face, crossing the body midline
     emotion: 'happy',
+    fingerCurl: 0.15,   // relaxed open hand — dead-flat fingers read as robotic
     bones: {
       rightUpperArm: { y: 0.9, z: -2.2 },
       rightLowerArm: { y: -0.2, z: -0.3 },
       head: { z: 0.1 },
     },
     via: { rightUpperArm: { y: 0.8, z: -1.2 }, rightLowerArm: { z: -0.2 } }, // side-raise transit, hand stays outboard
-    wiggle: { bone: 'rightLowerArm', axis: 'y', amp: 0.3, freq: 4.2 },
+    wiggle: { bone: 'rightLowerArm', axis: 'y', amp: 0.3, freq: 2.6, follow: 'rightHand', lead: 'rightUpperArm' },
   },
 }
 
@@ -156,6 +157,9 @@ export class Behavior {
   setAction(name, seconds = 4) {
     if (name === 'jump') { if (this.jumpT < 0) this.jumpT = 0; return true }
     if (!ACTIONS[name]) return false
+    // no waving mid-speech: the talk mocap owns body language, and a wave
+    // popping in between sentences reads as a robot arm
+    if (name === 'wave' && (this.lip.playing || this.talkT > 0)) return false
     this.actionName = name
     this.actionT = seconds
     return true
@@ -218,12 +222,30 @@ export class Behavior {
     else this.talkT -= dt
     const talking = this.talkT > 0
 
+    // real talking-body mocap (Talking.fbx, drives every joint incl. fingers):
+    // play it while speaking, fade back to procedural idle when done. Never
+    // while dancing (dance owns the body).
+    const wantTalkAnim = talking && !this.dancing && !a.dance?.busy && a.gesture
+    if (wantTalkAnim && !this._talkAnim) { this._talkAnim = true; a.gesture.play(a.talkClip) }
+    else if (!wantTalkAnim && this._talkAnim) { this._talkAnim = false; a.gesture.stop() }
+
     // body envelope (smoothed); mouth reads lipLevel directly from the analyser
     const envK = 1 - Math.exp(-dt * 7)
     this.talkEnv += (level - this.talkEnv) * envK
     this.talkLow += (bands.low * lipLevel - this.talkLow) * envK
     this.talkHigh += (bands.high * lipLevel - this.talkHigh) * envK
     const talk = talking ? this.talkEnv : 0
+
+    // organic groove oscillator: a slow weight-shift sway sampled with a phase
+    // LAG per body segment, so the motion travels up the spine (hips → chest →
+    // head) as a flexible chain instead of every bone pivoting together like a
+    // block. `bobAt` is a 2× roll for the chest figure-8. Amplitude lifts while
+    // talking / energized but never hits zero, so idle breathing still sways.
+    // Shared by the head, torso and arm-pendulum code below.
+    const grooveAmp = 0.55 + this.energy * 0.5 + (talking ? talk * 0.7 : 0)
+    const swW = 2 * Math.PI * 0.28              // ~0.28 Hz primary sway (~3.5s cycle)
+    const swayAt = lag => Math.sin(t * swW - lag)
+    const bobAt = lag => Math.sin(t * swW * 2 - lag)
 
     // ---------- visemes: audio-driven jaw + spectrum-shaped lips
     const lipK = 1 - Math.exp(-dt * 20)
@@ -352,6 +374,8 @@ export class Behavior {
         bundle(talkSway, 0.35, 0.25, 0.15),
         bundle(this.nod, 0.5, 0.15, 0.05),
         bundle(wobble(t, 0.2), 0.035, 0.06, 0.08),
+        // groove reaches the head LAST (biggest lag) — a slow turn + counter-roll
+        bundle(swayAt(1.4) * grooveAmp, 0.015, 0.06, 0.075),
         bundle(this.tiltPulse, 0.05, 0.02, 0.55),
         { x: this.emo.headX, y: 0, z: 0 },
       )
@@ -375,10 +399,12 @@ export class Behavior {
       }
     }
 
-    // ---------- dance: while the clip plays, the AnimationMixer owns the body
-    // (it runs after us in avatar.update); face/emotion channels above stay live
-    if (this.dancing || a.dance?.busy) {
-      this.smileTarget = Math.max(this.smileTarget, 0.7)
+    // ---------- clip-driven body: while a dance OR the talk mocap plays, the
+    // AnimationMixer owns the body (runs after us in avatar.update); the
+    // face/emotion/viseme channels above stay live on top of the real motion
+    if (this.dancing || a.dance?.busy || a.gesture?.busy) {
+      if (this.dancing || a.dance?.busy) this.smileTarget = Math.max(this.smileTarget, 0.7)
+      this.danceRestore = true
       return
     }
     const groundY = a.groundY ?? 0
@@ -414,7 +440,7 @@ export class Behavior {
     const breath = Math.sin(t * 1.6)
     const breath2 = Math.sin(t * 1.6 + 0.4)
     // ---------- jump: anticipation crouch → ballistic flight → landing absorb
-    let jumpAir = 0
+    let jumpAir = 0, toeT = 0
     this._jumpKnee = 0
     if (this.jumpT >= 0) {
       this.jumpT += dt
@@ -425,40 +451,49 @@ export class Behavior {
         const ft = T - 0.18
         jumpAir = Math.max(0, 2 * ft - 4 * ft * ft)
         this._jumpKnee = 0.3                // legs tuck in the air
+        toeT = 0.7                          // toes POINT in flight, never flat/flapping
       } else if (T < 1.0) {                 // absorb the landing
         this._jumpKnee = (1 - (T - 0.68) / 0.32) * 0.5
       } else this.jumpT = -1
     }
+    // fast ease so the point starts at takeoff and relaxes right at touchdown
+    this._jumpToe = (this._jumpToe || 0) + (toeT - (this._jumpToe || 0)) * (1 - Math.exp(-dt * 14))
     a.scene.position.y = groundY + jumpAir
     a.scene.rotation.y = 0
     const leanDrive = this.pose.lean + wobble(t, 0.08) * 0.008
     const twistDrive = this.pose.twist + (talking ? talkSway * 0.3 : 0)
+    // spine leads the groove wave (smallest lag); chest and neck follow later
     const spine = a.getBone('spine')
     if (spine) {
       const r = restOf(spine)
       setBone(spine, {
-        x: r.x + breath * 0.010,
-        y: r.y + twistDrive * 0.45,
-        z: r.z + leanDrive * 0.5,
+        x: r.x + breath * 0.010 + bobAt(0.2) * 0.006 * grooveAmp,
+        y: r.y + twistDrive * 0.45 + swayAt(0.35) * 0.013 * grooveAmp,
+        z: r.z + leanDrive * 0.5 + swayAt(0.2) * 0.021 * grooveAmp,
       })
     }
+    // chest swings WIDER and LATER than the spine (follow-through), plus a
+    // gentle fore/aft roll at 2× → a figure-8, the signature of a live ribcage
+    // rather than a rigid box that only breathes
     const chest = a.getBone('chest')
     if (chest) {
       const r = restOf(chest)
       setBone(chest, {
-        x: r.x + breath * 0.028 + this.pose.drop + (talking ? talk * 0.015 : 0),
-        y: r.y + twistDrive * 0.4 + talkSway * 0.06,
-        z: r.z + leanDrive * 0.45,
+        x: r.x + breath * 0.030 + this.pose.drop + (talking ? talk * 0.018 : 0)
+          + bobAt(0.7) * 0.012 * grooveAmp,
+        y: r.y + twistDrive * 0.4 + talkSway * 0.06 + swayAt(0.9) * 0.028 * grooveAmp,
+        z: r.z + leanDrive * 0.45 + swayAt(0.6) * 0.036 * grooveAmp,
       })
     }
     const neck = a.getBone('neck')
     if (neck) {
       const r = restOf(neck)
+      // neck counters the chest swing so the head stays roughly level, but lags
+      // so the counter reads as elastic, not a robotic instant correction
       setBone(neck, {
         x: r.x + breath2 * 0.012 + talkSway * 0.05 + wobble(t, 0.18) * 0.008,
-        y: r.y + twistDrive * 0.2,
-        // neck counters the torso lean so the head stays level
-        z: r.z - leanDrive * 0.55,
+        y: r.y + twistDrive * 0.2 + swayAt(1.2) * 0.010 * grooveAmp,
+        z: r.z - leanDrive * 0.55 - swayAt(1.0) * 0.020 * grooveAmp,
       })
     }
     // shoulders: tiny breathing shrug, opposite phase per side
@@ -513,34 +548,22 @@ export class Behavior {
       const foot = a.getBone(fk)
       if (foot) {
         const r = restOf(foot)
-        setBone(foot, { x: r.x, y: r.y, z: r.z + knee * 0.5 })
+        // airborne: the toe point overrides the keep-flat knee compensation
+        setBone(foot, { x: r.x, y: r.y, z: r.z + knee * 0.5 - this._jumpToe })
       }
     }
     this._kneeAvg = kneeSum / 2
     // ---------- arms. Axes measured on this rig (both sides mirrored):
     // z− lifts the upper arm forward / bends the elbow forward, y− flares out.
-    // While talking: conversational gestures — a new arm pose every ~2s, elbows
-    // bend up, emphasis syllables pulse extra bend. Idle: barely-alive drift.
+    // Talking body language comes from the Talking.fbx mocap (clip-driven above);
+    // the old procedural talk gestures read as robotic, so here arms only do the
+    // barely-alive idle drift, relaxing any leftover gesture pose.
     this.energy += (0.5 - this.energy) * (1 - Math.exp(-dt * 0.35)) // cool down
-    this.gestT -= dt
-    if (this.gestT <= 0) {
-      // energized speech → faster, bigger gestures; calm speech → sparser
-      this.gestT = (1.4 + Math.random() * 1.8) / (0.6 + this.energy * 0.8)
-      const amp = 0.55 + this.energy * 0.9
-      for (const g of this.gestGoal) {
-        if (talking && Math.random() < 0.75) {
-          g.bend = (0.45 + Math.random() * 0.6) * amp   // forearm comes up
-          g.lift = (0.10 + Math.random() * 0.22) * amp  // shoulder forward
-          g.out = 0.05 + Math.random() * 0.18           // flare out — never into the torso
-        } else { g.bend = 0; g.lift = 0; g.out = 0 }
-      }
-    }
-    if (!talking) for (const g of this.gestGoal) { g.bend = 0; g.lift = 0; g.out = 0 }
     const gestK = 1 - Math.exp(-dt * 3.2)
     for (let i = 0; i < 2; i++)
       for (const k of ['bend', 'lift', 'out'])
-        this.gest[i][k] += (this.gestGoal[i][k] - this.gest[i][k]) * gestK
-    const beatPulse = this.nod * 0.35   // loud-syllable emphasis → extra elbow bend
+        this.gest[i][k] += (0 - this.gest[i][k]) * gestK
+    const beatPulse = 0   // was nod-driven elbow pulse — robotic, retired with the talk gestures
 
     const armLife = [
       { upper: 'leftUpperArm', lower: 'leftLowerArm', hand: 'leftHand', ph: 0, side: 1 },
@@ -549,12 +572,21 @@ export class Behavior {
     const shoulderK = 1 - Math.exp(-dt * 8)
     const elbowK = 1 - Math.exp(-dt * 5.5)
     const wristK = 1 - Math.exp(-dt * 10)
+    // pendulum follow-through: the arms hang off the swinging torso and TRAIL it
+    // (upper arm lags the chest, forearm lags the upper arm) — the secondary
+    // motion that separates a living limb from a rod bolted to the shoulder.
+    // *arm.side below makes left/right counter-swing, like a natural gait sway.
+    const armPendU = swayAt(1.6) * grooveAmp
+    const armPendL = swayAt(2.1) * grooveAmp
     for (let i = 0; i < armLife.length; i++) {
       const arm = armLife[i]
       const g = this.gest[i]
       const gesturing = g.bend > 0.03
-      const idleSway = wobble(t + arm.ph, 0.13) * 0.024 + breath * 0.006
-      const idleBend = 0.05 + wobble(t + arm.ph + 0.75, 0.16) * 0.03
+      // relaxed arms are never ramrod-straight: a standing elbow carries ~10°
+      // of bend, and the shoulder drifts on two slow frequencies so the motion
+      // reads as alive, not a single mechanical sine
+      const idleSway = wobble(t + arm.ph, 0.13) * 0.034 + wobble(t + arm.ph + 2.1, 0.07) * 0.02 + breath * 0.008
+      const idleBend = 0.13 + wobble(t + arm.ph + 0.75, 0.16) * 0.05 + wobble(t + arm.ph, 0.09) * 0.03
       const talkWave = gesturing ? wobble(t + arm.ph, 0.5) * 0.05 : 0
 
       const upper = a.getBone(arm.upper)
@@ -563,8 +595,8 @@ export class Behavior {
         if (!upper.userData.smooth) upper.userData.smooth = { x: r.x, y: r.y, z: r.z }
         const s = upper.userData.smooth
         s.x = r.x
-        s.y += ((r.y + idleSway - g.out) - s.y) * shoulderK
-        s.z += ((r.z - g.lift - beatPulse * 0.15) - s.z) * shoulderK
+        s.y += ((r.y + idleSway - g.out + armPendU * arm.side * 0.045) - s.y) * shoulderK
+        s.z += ((r.z - g.lift - beatPulse * 0.15 + armPendU * 0.025) - s.z) * shoulderK
         setBone(upper, s)
       }
       const lower = a.getBone(arm.lower)
@@ -573,8 +605,8 @@ export class Behavior {
         if (!lower.userData.smooth) lower.userData.smooth = { x: r.x, y: r.y, z: r.z }
         const s = lower.userData.smooth
         s.x = r.x
-        s.y += ((r.y - idleSway * 0.35) - s.y) * elbowK
-        s.z += ((r.z - (idleBend + g.bend + beatPulse + talkWave)) - s.z) * elbowK
+        s.y += ((r.y - idleSway * 0.35 + armPendL * arm.side * 0.03) - s.y) * elbowK
+        s.z += ((r.z - (idleBend + g.bend + beatPulse + talkWave) + armPendL * 0.02) - s.z) * elbowK
         setBone(lower, s)
       }
       const hand = a.getBone(arm.hand)
@@ -618,9 +650,19 @@ export class Behavior {
         bb.rotation.y += (r.y + path(k, 'y', off) - bb.rotation.y) * w
         bb.rotation.z += (r.z + path(k, 'z', off) - bb.rotation.z) * w
       }
-      if (A.wiggle) { // e.g. the wave: oscillate one joint while held
+      if (A.wiggle) { // e.g. the wave: amplitude breathes (never a fixed metronome)
+        // and the wrist TRAILS the forearm by a phase lag — the follow-through
+        // that separates a hand wave from a windscreen wiper
+        const ph = t * A.wiggle.freq * Math.PI * 2
+        const breathe = 0.7 + 0.3 * Math.sin(t * 1.4 + 1)
+        // whole-arm chain: upper arm LEADS the swing, forearm carries it,
+        // wrist trails — each a phase step behind the one driving it
+        const ld = A.wiggle.lead && a.getBone(A.wiggle.lead)
+        if (ld) ld.rotation[A.wiggle.axis] += Math.sin(ph + 0.45) * breathe * A.wiggle.amp * 0.35 * w
         const wb = a.getBone(A.wiggle.bone)
-        if (wb) wb.rotation[A.wiggle.axis] += Math.sin(t * A.wiggle.freq * Math.PI * 2) * A.wiggle.amp * w
+        if (wb) wb.rotation[A.wiggle.axis] += Math.sin(ph) * breathe * A.wiggle.amp * w
+        const fw = A.wiggle.follow && a.getBone(A.wiggle.follow)
+        if (fw) fw.rotation[A.wiggle.axis] += Math.sin(ph - 0.9) * breathe * A.wiggle.amp * 0.55 * w
       }
       if (A.fingerCurl && a.fingers)
         for (const list of [a.fingers.left, a.fingers.right])

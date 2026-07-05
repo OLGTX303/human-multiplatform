@@ -54,6 +54,17 @@ MODELS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="HoloHuman")
 
+# one client per endpoint, reused across requests — a fresh AsyncOpenAI per
+# call pays TCP+TLS setup every sentence
+_clients: dict = {}
+
+
+def _client(base_url: str, api_key: str) -> AsyncOpenAI:
+    key = (base_url, api_key)
+    if key not in _clients:
+        _clients[key] = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    return _clients[key]
+
 
 @app.on_event("startup")
 async def _warmup_models():
@@ -68,7 +79,7 @@ async def _warmup_models():
 @app.post("/api/chat")
 async def chat(body: dict):
     cfg = CFG["llm"]
-    client = AsyncOpenAI(base_url=cfg["base_url"], api_key=cfg["api_key"])
+    client = _client(cfg["base_url"], cfg["api_key"])
     messages = [{"role": "system", "content": cfg["system_prompt"]}] + body["messages"]
 
     async def gen():
@@ -162,7 +173,7 @@ async def tts(body: dict):
 
     if engine == "openai":
         o = CFG["tts"]["openai"]
-        client = AsyncOpenAI(base_url=o["base_url"], api_key=o["api_key"])
+        client = _client(o["base_url"], o["api_key"])
         resp = await client.audio.speech.create(
             model=o["model"], voice=o["voice"], input=text)
         return Response(resp.content, media_type="audio/mpeg")
@@ -191,7 +202,7 @@ async def asr(audio: UploadFile = File(...)):
     data = await audio.read()
     if CFG["asr"]["engine"] == "openai":
         o = CFG["asr"]["openai"]
-        client = AsyncOpenAI(base_url=o["base_url"], api_key=o["api_key"])
+        client = _client(o["base_url"], o["api_key"])
         resp = await client.audio.transcriptions.create(
             model=o["model"], file=(audio.filename or "audio.webm", data))
         return {"text": resp.text}
@@ -200,7 +211,9 @@ async def asr(audio: UploadFile = File(...)):
         kw = dict(
             language=CFG["asr"]["local"]["language"],
             beam_size=1,
-            vad_filter=True,
+            # no vad_filter: the browser already VAD-trims to speech; silero
+            # here just added ~100-200ms per utterance
+            vad_filter=False,
             condition_on_previous_text=False,
         )
         segments, _info = _get_whisper().transcribe(io.BytesIO(data), **kw)
